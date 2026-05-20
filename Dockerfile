@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -17,5 +17,9 @@ COPY . .
 # Create logs directory
 RUN mkdir -p logs config
 
-# Default: start the scheduler
-CMD ["python", "agent.py"]
+# Copy entrypoint script
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+# Entrypoint: auto-auth then start agent
+ENTRYPOINT ["/app/entrypoint.sh"]
