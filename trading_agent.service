@@ -1,0 +1,18 @@
+[Unit]
+Description=AI Stock Trading Agent
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/trading_agent
+EnvironmentFile=/home/ubuntu/trading_agent/.env
+ExecStart=/usr/bin/python3 /home/ubuntu/trading_agent/agent.py
+Restart=always
+RestartSec=30
+StandardOutput=append:/var/log/trading_agent.log
+StandardError=append:/var/log/trading_agent.log
+
+[Install]
+WantedBy=multi-user.target

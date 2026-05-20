@@ -1,0 +1,44 @@
+{
+  "NSE:M&M-EQ": {
+    "debt_to_equity": 0.22,
+    "roe": 18.4,
+    "profit_growth_yoy": 14.2,
+    "institutional_change_pct": 0.85
+  },
+  "NSE:INFY-EQ": {
+    "debt_to_equity": 0.05,
+    "roe": 31.2,
+    "profit_growth_yoy": 6.8,
+    "institutional_change_pct": -0.12
+  },
+  "NSE:BEL-EQ": {
+    "debt_to_equity": 0.01,
+    "roe": 24.6,
+    "profit_growth_yoy": 19.1,
+    "institutional_change_pct": 1.40
+  },
+  "NSE:COFORGE-EQ": {
+    "debt_to_equity": 0.41,
+    "roe": 21.8,
+    "profit_growth_yoy": 11.3,
+    "institutional_change_pct": 0.32
+  },
+  "NSE:ICICIBANK-EQ": {
+    "debt_to_equity": 0.95,
+    "roe": 17.2,
+    "profit_growth_yoy": 15.6,
+    "institutional_change_pct": 0.70
+  },
+  "NSE:SOUTHBANK-EQ": {
+    "debt_to_equity": 1.10,
+    "roe": 11.5,
+    "profit_growth_yoy": 8.1,
+    "institutional_change_pct": -0.05
+  },
+  "NSE:TATAPOWER-EQ": {
+    "debt_to_equity": 1.35,
+    "roe": 12.1,
+    "profit_growth_yoy": 9.4,
+    "institutional_change_pct": 0.15
+  }
+}
