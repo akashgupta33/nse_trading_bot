@@ -4,27 +4,24 @@ set -e
 # entrypoint.sh - Auto-auth before starting the agent
 # This runs inside the Docker container to ensure token is fresh
 
-echo "$(date '+%Y-%m-%d %H:%M:%S') | INFO | entrypoint: Starting Fyers auto-auth..."
+echo "$(date '+%Y-%m-%d %H:%M:%S') | INFO | entrypoint: Checking Fyers token..."
 
-# Try headless TOTP first (silent mode)
+# Check if valid token already exists (first priority)
+if python auto_auth.py --test 2>/dev/null; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') | SUCCESS | entrypoint: Valid token found, skipping auth"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') | SUCCESS | entrypoint: Starting agent..."
+    exec python agent.py
+fi
+
+# No valid token - try TOTP (headless, works in Docker)
+echo "$(date '+%Y-%m-%d %H:%M:%S') | WARNING | entrypoint: No valid token, attempting TOTP auth..."
 if python auto_auth.py --mode totp 2>/dev/null; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') | SUCCESS | entrypoint: TOTP auto-auth successful"
-else
-    echo "$(date '+%Y-%m-%d %H:%M:%S') | WARNING | entrypoint: TOTP auth failed, trying Telegram fallback..."
-    if python auto_auth.py --mode telegram; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') | SUCCESS | entrypoint: Telegram auth successful"
-    else
-        echo "$(date '+%Y-%m-%d %H:%M:%S') | ERROR | entrypoint: Both auth modes failed - agent will not start"
-        exit 1
-    fi
+    echo "$(date '+%Y-%m-%d %H:%M:%S') | SUCCESS | entrypoint: Starting agent..."
+    exec python agent.py
 fi
 
-# Verify token works
-echo "$(date '+%Y-%m-%d %H:%M:%S') | INFO | entrypoint: Verifying Fyers connection..."
-if python auto_auth.py --test; then
-    echo "$(date '+%Y-%m-%d %H:%M:%S') | SUCCESS | entrypoint: Fyers connection verified. Starting agent..."
-    exec python agent.py
-else
-    echo "$(date '+%Y-%m-%d %H:%M:%S') | ERROR | entrypoint: Fyers connection verification failed"
-    exit 1
-fi
+# TOTP failed (missing config) - proceed with current token and log warning
+echo "$(date '+%Y-%m-%d %H:%M:%S') | WARNING | entrypoint: TOTP auth not configured or failed"
+echo "$(date '+%Y-%m-%d %H:%M:%S') | INFO | entrypoint: Proceeding with existing token (if available)..."
+exec python agent.py
