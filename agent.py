@@ -18,6 +18,51 @@ from brain.execution_agent import execution_agent
 from execution.order_manager import order_manager
 from monitor.alerting import portfolio_alerter, trade_db
 
+
+def job_refresh_auth():
+    """Refresh Fyers auth daily at 8:00 AM. Check token first, use Telegram if expired."""
+    logger.info("=== JOB: FYERS AUTH REFRESH ===")
+    try:
+        from auto_auth import verify_token, telegram_auth_request
+        from monitor.alerting import portfolio_alerter
+
+        # Check if token is still valid
+        if verify_token():
+            logger.info("Fyers auth refresh: existing token still valid.")
+            portfolio_alerter.send("✅ <b>Fyers token is valid</b> - ready to trade today 🚀")
+            return
+
+        logger.warning("Fyers auth refresh: token expired, requesting renewal via Telegram...")
+        portfolio_alerter.send(
+            "🔑 <b>Daily Token Refresh Needed</b>\n\n"
+            "Your Fyers token expired. Please authenticate:\n\n"
+            "1️⃣ Check your Telegram in the next 30 seconds\n"
+            "2️⃣ Click the login link sent by the bot\n"
+            "3️⃣ Enter your OTP + PIN\n"
+            "4️⃣ Agent will auto-capture the token\n\n"
+            "⏱️ This takes ~30 seconds. Complete before 09:00 for market open."
+        )
+        
+        # Trigger Telegram-based auth (proven to work)
+        if telegram_auth_request():
+            logger.success("Fyers auth refresh: Telegram-assisted renewal succeeded.")
+            portfolio_alerter.send("✅ <b>Token refreshed successfully!</b>\nReady to trade. 🚀")
+            return
+
+        logger.error("Fyers auth refresh failed.")
+        portfolio_alerter.send(
+            "❌ <b>Token Refresh Failed</b>\n\n"
+            "Please manually run:\n"
+            "`python auto_auth.py --mode telegram`\n\n"
+            "Then restart the agent."
+        )
+
+    except Exception as e:
+        logger.error(f"Fyers auth refresh job error: {e}")
+        from monitor.alerting import portfolio_alerter
+        portfolio_alerter.send(f"❌ Auth refresh error: {str(e)}")
+        portfolio_alerter.send(f"⚠️ Auth refresh error: {str(e)[:150]}")
+
 IST = pytz.timezone("Asia/Kolkata")
 
 # Module-level state - watchlist persists from 9 AM to EOD
@@ -337,6 +382,7 @@ def start_scheduler():
         
     scheduler = BlockingScheduler(timezone=IST)
     
+    scheduler.add_job(job_refresh_auth, CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone=IST), id="auth_refresh")
     scheduler.add_job(job_screener, CronTrigger(day_of_week="mon-fri", hour=8, minute=45, timezone=IST), id="screener")
     scheduler.add_job(job_analyst, CronTrigger(day_of_week="mon-fri", hour=9, minute=0, timezone=IST), id="analyst")
     scheduler.add_job(job_execution, CronTrigger(day_of_week="mon-fri", hour=9, minute=20, timezone=IST), id="execution")

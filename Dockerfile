@@ -17,6 +17,9 @@ COPY . .
 # Create logs directory
 RUN mkdir -p logs config
 
+# Persist Fyers token and runtime config outside the container filesystem
+VOLUME ["/app/config"]
+
 # Copy entrypoint script
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh

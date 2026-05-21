@@ -5,7 +5,7 @@ from typing import Optional
 from loguru import logger
 import pytz
 
-from config import settings, indicator_config as C
+from config.settings import settings, indicator_config as C
 
 IST = pytz.timezone("Asia/Kolkata")
 

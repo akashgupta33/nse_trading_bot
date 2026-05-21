@@ -1,9 +1,11 @@
+import time
 from datetime import datetime
 from typing import Optional
+import pandas as pd
 import pytz
 from loguru import logger
 
-from config.settings import settings, indicator_config as C, MarketTime
+from config.settings import settings, indicator_config as C
 from data.fyers_client import fyers_client
 from indicators.engine import indicator_engine, IndicatorSnapshot
 
@@ -12,26 +14,15 @@ IST = pytz.timezone("Asia/Kolkata")
 class ScreenerAgent:
     """
     Screener Agent - Layer 1 of the 3-agent system.
-
-    Scans the full NSE watchlist (60+ stocks) using pure technical indicators.
-    No Claude involved - pure Python, fast, cheap.
+    Scans the full NSE watchlist securely forcing Daily ("D") resolution.
     Outputs the top N stocks ranked by screener_score for the Analyst Agent.
-
-    Filters:
-      - Price above EMA200 (uptrend)
-      - ADX >= 20 (trending)
-      - Nifty50 itself above EMA200 (market not in bear mode)
-      - Price >= min_price
-      - Healthy pullback exists (3-15% from recent high)
-
-    Ranks by screener_score (0-100) computed in indicator engine.
     """
 
-    def run(self) -> Optional[list]:
+    def run(self) -> list:
         """
         Full screener pipeline.
         Returns list of top-N IndicatorSnapshot objects, ranked best first.
-        Returns None if market is in bear mode (Nifty below EMA200).
+        Returns empty list if market is in bear mode (Nifty below EMA200).
         """
         logger.info(f"=== SCREENER START - scanning {len(settings.nse_watchlist)} symbols ===")
 
@@ -39,106 +30,87 @@ class ScreenerAgent:
         if settings.nifty_above_ema200_required:
             nifty_ok = self._check_nifty_trend()
             if not nifty_ok:
-                logger.warning("Nifty50 is below EMA200 - bear market filter active. No new longs.")
-                return []  # Empty list = screener ran but found nothing safe
+                logger.warning("Nifty50 is below EMA200 - systemic bear market filter active. Halting new longs.")
+                return [] 
 
-        # ----- Step 2: Fetch data for all watchlist symbols -----
-        watchlist = [s for s in settings.nse_watchlist if "NIFTY50" not in s]
-        universe_data = fyers_client.fetch_universe_data(watchlist, days=250)
+        # ----- Step 2: Fetch clean Daily ("D") data for all watchlist symbols -----
+        universe_data = {}
+        for sym in settings.nse_watchlist:
+            if "NIFTY50" in sym:
+                continue
+            try:
+                df = fyers_client.get_historical(sym, days=220, resolution="D")
+                if df is not None and not df.empty:
+                    df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
+                    universe_data[sym] = df
+                
+                # API rate limit protection
+                time.sleep(0.12)
+            except Exception as e:
+                logger.error(f"Screener data extraction failed for {sym}: {e}")
+                continue
 
         if not universe_data:
-            logger.error("No data fetched from Fyers - screener aborted")
-            return None
+            logger.error("No daily arrays fetched from broker - screener aborted.")
+            return []
 
-        # ----- Step 3: Compute indicators -----
+        # ----- Step 3: Compute technical snapshots -----
         snapshots = indicator_engine.compute_universe(universe_data)
-        logger.info(f"Computed indicators for {len(snapshots)} symbols")
+        logger.info(f"Computed mathematical matrices for {len(snapshots)} symbols.")
 
-        # ----- Step 4: Apply hard filters -----
+        # ----- Step 4: Apply strict institutional confirmation gate -----
         candidates = []
-        filtered_out = {"no_ema200": 0, "no_adx": 0, "no_pullback": 0, "price_too_low": 0, "low_score": 0}
-
         for symbol, snap in snapshots.items():
-            # Hard filter 1: must be in uptrend
-            if not snap.price_above_ema200:
-                filtered_out["no_ema200"] += 1
-                continue
+            # Only accept assets that passed ALL directional, volume, and structural checks
+            if getattr(snap, "setup_qualified", False):
+                candidates.append(snap)
 
-            # Hard filter 2: must have trending ADX
-            if not snap.adx_strong:
-                filtered_out["no_adx"] += 1
-                continue
-
-            # Hard filter 3: price must be above minimum
-            if snap.close < settings.screener_min_price:
-                filtered_out["price_too_low"] += 1
-                continue
-
-            # Hard filter 4: must have a pullback (avoid stocks at all-time highs)
-            if snap.pullback_pct < C.PULLBACK_MIN_PCT:
-                filtered_out["no_pullback"] += 1
-                continue
-
-            # Soft filter: minimum screener score
-            if snap.screener_score < 20:
-                filtered_out["low_score"] += 1
-                continue
-
-            candidates.append(snap)
-
-        logger.info(
-            f"Filtered out: EMA200={filtered_out['no_ema200']} | "
-            f"ADX={filtered_out['no_adx']} | pullback={filtered_out['no_pullback']} | "
-            f"low_score={filtered_out['low_score']} | price={filtered_out['price_too_low']}"
-        )
-        logger.info(f"Candidates after filter: {len(candidates)}")
+        logger.info(f"Candidates surviving the Golden Gate: {len(candidates)}")
 
         # ----- Step 5: Rank by screener_score -----
         candidates.sort(key=lambda s: s.screener_score, reverse=True)
 
-        # Assign ranks
         for i, snap in enumerate(candidates):
             snap.screener_rank = i + 1
 
-        # Return top N
         top_n = candidates[:settings.screener_top_n]
 
-        logger.info(
-            f"Top {len(top_n)} candidates:\n" +
-            "\n".join(
-                f"  #{s.screener_rank} {s.symbol}: score={s.screener_score} | "
-                f"₹{s.close} | RSI={s.rsi} | pullback={s.pullback_pct:.1f}%"
-                for s in top_n[:10]  # log first 10
+        if top_n:
+            logger.success(
+                f"Top {len(top_n)} Qualified Targets:\n" +
+                "\n".join(
+                    f"  #{s.screener_rank} {s.symbol}: Score={s.screener_score}/100 | "
+                    f"₹{s.close} | RSI={s.rsi:.1f} | Pullback={s.pullback_pct:.1f}%"
+                    for s in top_n[:10]  
+                )
             )
-        )
 
         return top_n
 
     def _check_nifty_trend(self) -> bool:
-        """Returns True if Nifty50 is above its 200 EMA (healthy market)."""
+        """Returns True if Nifty50 is above its 200 EMA (healthy market environment)."""
         try:
-            nifty_data = fyers_client.fetch_universe_data(
-                [settings.nifty_symbol], days=250
-            )
-            if not nifty_data:
-                logger.warning("Could not fetch Nifty data - assuming market ok")
+            df = fyers_client.get_historical(settings.nifty_symbol, days=220, resolution="D")
+            if df is None or df.empty:
+                logger.warning("Could not fetch Nifty data - assuming market ok to prevent hard block.")
+                return True
+                
+            df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
+            snap = indicator_engine.compute(settings.nifty_symbol, df)
+            
+            if not snap:
                 return True
 
-            nifty_snaps = indicator_engine.compute_universe(nifty_data)
-            nifty_snap = next(iter(nifty_snaps.values()), None)
-            if not nifty_snap:
-                return True
-
-            is_above = nifty_snap.price_above_ema200
+            is_above = snap.price_above_ema200
             logger.info(
-                f"Nifty50: ₹{nifty_snap.close} | EMA200: ₹{nifty_snap.ema200} | "
-                f"{'ABOVE ✓' if is_above else 'BELOW X'}"
+                f"NIFTY 50 MACRO TREND: ₹{snap.close} | 200 EMA: ₹{snap.ema200} | "
+                f"{'BULLISH CONFIRMED ✓' if is_above else 'BEARISH X'}"
             )
             return is_above
 
         except Exception as e:
-            logger.error(f"Nifty check error: {e}")
-            return True  # fail open - don't block trading on data errors
+            logger.error(f"Nifty macro check exception: {e}")
+            return True
 
 
 # Singleton

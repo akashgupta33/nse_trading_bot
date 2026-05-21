@@ -34,6 +34,10 @@ from datetime import datetime
 from pathlib import Path
 import pytz
 from loguru import logger
+from dotenv import load_dotenv
+
+# Load .env file explicitly
+load_dotenv()
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -68,14 +72,14 @@ def auto_auth_totp() -> bool:
     
     # App ID is the part before the hyphen in client_id e.g. "XYZ123" from "XYZ123-100"
     app_id = os.getenv("FYERS_APP_ID", client_id.split("-")[0])
-    password = os.getenv("FYERS_PASSWORD", "")
+    pin = os.getenv("FYERS_PIN", "")  # Changed from PASSWORD to PIN
     pan_or_dob = os.getenv("FYERS_PAN_DOB", "")
     totp_secret = os.getenv("FYERS_TOTP_SECRET", "")
     redirect_uri = settings.fyers_redirect_uri
     secret_key = settings.fyers_secret_key
 
-    if not all([password, pan_or_dob, totp_secret]):
-        logger.warning("TOTP auto-auth needs FYERS_PASSWORD, FYERS_PAN_DOB, FYERS_TOTP_SECRET in .env")
+    if not all([pin, pan_or_dob, totp_secret]):
+        logger.warning("TOTP auto-auth needs FYERS_PIN, FYERS_PAN_DOB, FYERS_TOTP_SECRET in .env")
         return False
 
     try:
@@ -87,11 +91,11 @@ def auto_auth_totp() -> bool:
             "Content-Type": "application/json"
         }
 
-        # Step 1: Send client_id + password
+        # Step 1: Send client_id + PIN (as password field in API)
         payload1 = {
-            "fy_id": pan_or_dob, # Maps to credential identifiers in internal gateway flow
+            "fy_id": pan_or_dob,
             "app_id": app_id,
-            "password": password
+            "password": pin  # Fyers API accepts PIN in password field
         }
         r = session.post("https://api-t1.fyers.in/vagator/v2/send_login_otp_v2", json=payload1, headers=headers, timeout=10)
         
@@ -120,7 +124,7 @@ def auto_auth_totp() -> bool:
 
         # Step 3: PIN verification
         logger.info("IDIP auth: Step 3 - PIN verification")
-        pin_hash = hashlib.sha256(password.encode()).hexdigest()
+        pin_hash = hashlib.sha256(pin.encode()).hexdigest()  # Hash the actual PIN
         
         payload3 = {
             "request_key": request_key,
@@ -242,6 +246,9 @@ def telegram_auth_request() -> bool:
     )
     auth_url = sess.generate_authcode()
 
+    # Log the auth URL so it can be opened manually if Telegram click fails
+    logger.info(f"Fyers auth URL: {auth_url}")
+
     msg = (
         f"<b>🔑 Fyers daily re-auth needed</b>\n\n"
         f"🔗 <a href='{auth_url}'>Click this link to login</a>\n"
@@ -255,21 +262,90 @@ def telegram_auth_request() -> bool:
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            parsed = urllib.parse.urlparse(self.path)
-            params = urllib.parse.parse_qs(parsed.query)
-            code = params.get("auth_code", params.get("code", [None]))[0]
-            if code:
-                auth_code_holder[0] = code
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html")
-                self.end_headers()
-                self.wfile.write(b"<h1>Auth successful! Return to terminal.</h1>")
-            else:
-                self.send_response(400)
-                self.end_headers()
+                        parsed = urllib.parse.urlparse(self.path)
+                        params = urllib.parse.parse_qs(parsed.query)
+                        code = params.get("auth_code", params.get("code", [None]))[0]
+                        if code:
+                                auth_code_holder[0] = code
+                                self.send_response(200)
+                                self.send_header("Content-Type", "text/html")
+                                self.end_headers()
+                                self.wfile.write(b"<h1>Auth successful! Return to terminal.</h1>")
+                                return
+
+                        # If code not in query (some providers return it in fragment),
+                        # serve a tiny HTML page that extracts the fragment and POSTs it back.
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/html")
+                        self.end_headers()
+                        html = b"""
+<html>
+    <head><meta charset="utf-8"><title>Auth callback</title></head>
+    <body>
+        <h1>Completing authentication...</h1>
+        <p>If your browser doesn't return to the app, click the button below.</p>
+        <button id="send">Send auth to app</button>
+        <script>
+            function postBody(body) {
+                fetch('/_capture', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)}).then(()=>{
+                    document.body.innerHTML = '<h1>Auth captured. You can close this tab.</h1>';
+                }).catch(()=>{
+                    document.body.innerHTML = '<h1>Failed to send auth to app. Please copy the URL and paste it to the terminal.</h1>';
+                });
+            }
+            (function(){
+                try {
+                    var params = new URLSearchParams(window.location.search);
+                    var code = params.get('auth_code') || params.get('code');
+                    if (code) { postBody({code: code}); return; }
+                    // Try fragment
+                    var frag = window.location.hash.substring(1);
+                    var fragParams = new URLSearchParams(frag);
+                    var fcode = fragParams.get('auth_code') || fragParams.get('code');
+                    if (fcode) { postBody({code: fcode}); return; }
+                } catch (e) { }
+                document.getElementById('send').addEventListener('click', function(){
+                    // attempt to send whatever we can
+                    var frag = window.location.hash.substring(1);
+                    var fragParams = new URLSearchParams(frag);
+                    var fcode = fragParams.get('auth_code') || fragParams.get('code') || null;
+                    postBody({code: fcode, url: window.location.href});
+                });
+            })();
+        </script>
+    </body>
+</html>
+"""
+                        self.wfile.write(html)
 
         def log_message(self, format, *args):
             pass  # Suppress server logs
+
+        def do_POST(self):
+            # Capture JSON POSTs from the HTML page's JS with the auth code
+            if self.path != '/_capture':
+                self.send_response(404)
+                self.end_headers()
+                return
+            length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(length) if length else b''
+            try:
+                data = json.loads(raw.decode('utf-8')) if raw else {}
+            except Exception:
+                data = {}
+            code = data.get('code') or ''
+            # Also accept full URL fallback
+            if not code and data.get('url'):
+                code = _extract_auth_code(data.get('url'))
+            if code:
+                auth_code_holder[0] = code
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html')
+                self.end_headers()
+                self.wfile.write(b'<h1>Auth captured. Return to the app.</h1>')
+            else:
+                self.send_response(400)
+                self.end_headers()
 
     server = http.server.HTTPServer(("0.0.0.0", 8080), Handler)
     server.timeout = 300  # 5 minutes to complete login

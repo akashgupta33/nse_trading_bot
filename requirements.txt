@@ -4,7 +4,7 @@ pandas>=2.0.0
 numpy>=1.24.0
 
 # Technical indicators
-pandas-ta>=0.3.14b
+pandas-ta==0.4.71b0
 
 # Fyers API
 fyers-apiv3>=3.0.0
