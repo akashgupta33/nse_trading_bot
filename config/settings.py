@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     trading_mode: str = Field("paper", env="TRADING_MODE")
 
     # ----- Institutional Capital Risk Allocations -----
-    paper_capital: float = Field(1000000.0, env="PAPER_CAPITAL")    # ₹10 Lakh Simulation Base
+    paper_capital: float = Field(1000000.0, env="PAPER_CAPITAL")     # ₹10 Lakh Simulation Base
     live_capital: float = Field(20000.0, env="LIVE_CAPITAL")         # ₹20,000 Real Capital Anchor
     risk_per_trade_pct: float = Field(1.5, env="RISK_PER_TRADE_PCT") # Strict 1.5% Volatility Risk Parity Limit
     max_positions: int = Field(4, env="MAX_POSITIONS")               # Synchronized to 4-slot position matrix
@@ -30,8 +30,8 @@ class Settings(BaseSettings):
     # ----- Portfolio Strategy Time Parameters -----
     min_conviction_score: float = Field(7.0, env="MIN_CONVICTION_SCORE")
     max_hold_days: int = Field(45, env="MAX_HOLD_DAYS")                  
-    stale_trade_days: int = Field(15, env="STALE_TRADE_DAYS")            
-    stale_trade_min_gain_pct: float = Field(3.0, env="STALE_TRADE_MIN_GAIN_PCT")
+    stale_trade_days: int = Field(21, env="STALE_TRADE_DAYS")        # Synced with the Stagnation Desk (21 Days)
+    stale_trade_min_gain_pct: float = Field(2.0, env="STALE_TRADE_MIN_GAIN_PCT")
 
     # ----- Curated High-Volume Nifty-50 Screener Universe -----
     screener_top_n: int = Field(20, env="SCREENER_TOP_N")                
@@ -51,10 +51,6 @@ class Settings(BaseSettings):
         "NSE:VOLTAS-EQ,NSE:APOLLOTYRE-EQ,NSE:EXIDEIND-EQ,NSE:DLF-EQ,NSE:PRESTIGE-EQ",
         env="NSE_WATCHLIST"
     )
-
-    # ----- Intraday Execution Monitor Timing -----
-    intraday_check_interval_min: int = Field(30, env="INTRADAY_CHECK_INTERVAL_MIN")
-    intraday_claude_trigger_pct: float = Field(3.0, env="INTRADAY_CLAUDE_TRIGGER_PCT")
 
     # ----- Macro Index Filters -----
     nifty_symbol: str = Field("NSE:NIFTY50-INDEX", env="NIFTY_SYMBOL")
@@ -95,7 +91,6 @@ class Settings(BaseSettings):
 class IndicatorConfig:
     # --- Institutional Trend Parameters (Daily Close Bars) ---
     EMA_FAST = 20
-    text_SLOW = 50
     EMA_SLOW = 50
     EMA_TREND = 200
     ADX_PERIOD = 14
@@ -109,7 +104,7 @@ class IndicatorConfig:
     # --- Daily RSI Pullback Strategy Zones ---
     RSI_PERIOD = 14
     RSI_PULLBACK_MIN = 40.0   # Floor of professional consolidation pool
-    RSI_PULLBACK_MAX = 57.0   # Optimized pullback tracking zone (Upgraded from 52.0)
+    RSI_PULLBACK_MAX = 57.0   # Optimized pullback tracking zone
     RSI_RESUMPTION = 50.0      
     RSI_OVERBOUGHT = 75.0     # Extended profit realization trigger point
     RSI_BUY_MIN = 35.0         
@@ -151,14 +146,18 @@ class IndicatorConfig:
 
 
 class MarketTime:
+    # --- Exchange Timings ---
     OPEN_HOUR, OPEN_MIN = 9, 15
-    SCREENER_HOUR, SCREENER_MIN = 8, 45     
-    ANALYST_HOUR, ANALYST_MIN = 9, 0         
-    TRADE_HOUR, TRADE_MIN = 9, 20           
-    INTRADAY_CHECK_START = 10, 0            
-    INTRADAY_CHECK_END = 15, 0              
-    EOD_REVIEW_HOUR, EOD_REVIEW_MIN = 15, 15 
     CLOSE_HOUR, CLOSE_MIN = 15, 30          
+    
+    # --- Orchestrator Triggers ---
+    SENTINEL_HOUR, SENTINEL_MIN = 15, 5      # 3:05 PM
+    EOD_REVIEW_HOUR, EOD_REVIEW_MIN = 15, 15 # 3:15 PM
+
+    # --- Claude Brain Constraints ---
+    CAUTION_HOUR = 13         # 1:00 PM (Caution phase begins)
+    NO_ENTRY_HOUR = 14        # 2:45 PM (Hard stop on new setups, focus on exits)
+    NO_ENTRY_MIN = 45
 
 
 # Singleton Declarations

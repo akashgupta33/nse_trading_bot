@@ -101,12 +101,15 @@ class IndicatorSnapshot:
     # Institutional Reversal Confirmation Elements
     rsi_turning_up: bool = False
     price_breaking_up: bool = False
-    setup_qualified: bool = False      # Ultimate execution gate for parent agents
+    setup_qualified: bool = False      
 
     # Strategy Evaluation Vectors
     entry_score: int = 0
     entry_conditions: dict = field(default_factory=dict)
     summary: str = ""
+    
+    # NEW: Fundamental Data Injection Payload
+    fundamentals: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -176,13 +179,12 @@ class IndicatorEngine:
                         prev_hist = float(macd_df[mh].iloc[-2])
                         snap.macd_histogram_rising = snap.macd_histogram > prev_hist
 
-                    # Bullish crossovers within a short lookback window
                     for i in range(1, min(4, len(macd_df))):
                         if macd_df[mc].iloc[-i] > macd_df[ms].iloc[-i] and macd_df[mc].iloc[-i-1] <= macd_df[ms].iloc[-i-1]:
                             snap.macd_crossed_bullish_recently = True
                             break
 
-            # 4. Relative Strength Index (RSI) Pullback Analysis
+            # 4. Relative Strength Index (RSI)
             df["rsi"] = ta.rsi(df["close"], length=int(C.RSI_PERIOD))
             snap.rsi = round(float(df["rsi"].iloc[-1]), 2)
             snap.rsi_in_pullback_zone = C.RSI_PULLBACK_MIN <= snap.rsi <= C.RSI_PULLBACK_MAX
@@ -193,7 +195,7 @@ class IndicatorEngine:
                 prev_rsi = float(df["rsi"].dropna().iloc[-2])
                 snap.rsi_crossing_above_50 = (prev_rsi <= 50) and (snap.rsi >= 50)
 
-            # 5. Stochastic Convergences
+            # 5. Stochastic
             stoch_df = ta.stoch(df["high"], df["low"], df["close"], length=int(C.STOCH_K), d=int(C.STOCH_D), smooth_k=int(C.STOCH_SMOOTH))
             if stoch_df is not None and not stoch_df.empty:
                 k_col = f"STOCHk_{C.STOCH_K}_{C.STOCH_D}_{C.STOCH_SMOOTH}"
@@ -207,11 +209,10 @@ class IndicatorEngine:
                         prev_d = float(stoch_df[d_col].iloc[-2])
                         snap.stoch_crossed_bullish_recently = (prev_k <= prev_d) and (snap.stoch_k > snap.stoch_p)
 
-            # 6. Average True Range (ATR) Volatility Metrics
+            # 6. Average True Range (ATR)
             df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=int(C.ATR_PERIOD))
             snap.atr = round(float(df["atr"].iloc[-1]), 2)
             
-            # Formulate structural thresholds with fixed institutional parameters
             snap.stop_loss_price = round(snap.close - (C.ATR_STOP_MULT * snap.atr), 2)
             snap.target1_price = round(snap.close + (C.ATR_TARGET1_MULT * snap.atr), 2)
             snap.target2_price = round(snap.close + (C.ATR_TARGET2_MULT * snap.atr), 2)
@@ -221,7 +222,7 @@ class IndicatorEngine:
             t2_dist = snap.target2_price - snap.close
             snap.rr_ratio = round(t2_dist / stop_dist, 2)
 
-            # 7. Bollinger Bands Formulations
+            # 7. Bollinger Bands
             bb_df = ta.bbands(df["close"], length=int(C.BB_PERIOD), std=float(C.BB_STD))
             if bb_df is not None and not bb_df.empty:
                 u_col = f"BBU_{C.BB_PERIOD}_{float(C.BB_STD)}"
@@ -234,7 +235,7 @@ class IndicatorEngine:
                     snap.price_near_lower_band = snap.close <= snap.bb_lower * 1.015
                     snap.price_near_upper_band = snap.close >= snap.bb_upper * 0.985
 
-            # 8. Supertrend Channels
+            # 8. Supertrend
             st_df = ta.supertrend(df["high"], df["low"], df["close"], length=int(C.SUPERTREND_PERIOD), multiplier=float(C.SUPERTREND_MULT))
             if st_df is not None and not st_df.empty:
                 st_val_col = f"SUPERT_{C.SUPERTREND_PERIOD}_{float(C.SUPERTREND_MULT)}"
@@ -243,19 +244,18 @@ class IndicatorEngine:
                     snap.supertrend_value = round(float(st_df[st_val_col].iloc[-1]), 2)
                     snap.supertrend_bullish = st_df[st_dir_col].iloc[-1] == 1
 
-            # 9. Volume Moving Average Verification & Gate Integration
+            # 9. Volume Moving Average Verification
             df["vol_ma20"] = df["volume"].rolling(int(C.VOLUME_MA_PERIOD)).mean()
             snap.volume_ma20 = round(float(df["vol_ma20"].iloc[-1]), 0)
             snap.volume_ratio = round(snap.volume / snap.volume_ma20, 2) if snap.volume_ma20 > 0 else 0.0
             
-            # Strict Rule: Reversal must possess institutional volume backing (At least 1.1x MA)
             snap.volume_confirmed = snap.volume_ratio >= C.VOLUME_RATIO_MIN
 
             if len(df) >= 5:
                 recent_vols = df["volume"].iloc[-5:-1].values
                 snap.volume_declining_pullback = bool(recent_vols[-1] < recent_vols[0])
 
-            # 10. Macro Pullback Analytics Layer
+            # 10. Macro Pullback Analytics
             lookback = min(20, len(df) - 1)
             recent_closes = df["close"].iloc[-lookback:]
             snap.recent_high = round(float(recent_closes.max()), 2)
@@ -265,12 +265,10 @@ class IndicatorEngine:
             high_idx = recent_closes.values.argmax()
             snap.pullback_days = int(lookback - high_idx - 1)
 
-            # Define healthy institutional daily retracements
             snap.is_healthy_pullback = (
                 C.PULLBACK_MIN_PCT <= snap.pullback_pct <= C.PULLBACK_MAX_PCT
             ) and (2 <= snap.pullback_days <= C.PULLBACK_MAX_DAYS)
 
-            # Support zone proximity metrics
             ema20_gap_pct = abs(snap.close - snap.ema20) / snap.ema20 * 100 if snap.ema20 > 0 else 999
             ema50_gap_pct = abs(snap.close - snap.ema50) / snap.ema50 * 100 if snap.ema50 > 0 else 999
             snap.at_ema20_support = ema20_gap_pct <= 1.5 and snap.close >= snap.ema20 * 0.98
@@ -280,7 +278,7 @@ class IndicatorEngine:
                 prev_high = float(df["high"].iloc[-2])
                 snap.entry_candle = snap.close > prev_high and snap.close > snap.open_
 
-            # --- THE GOLDEN REVERSAL DIRECTIONAL CONFIRMATION GATES ---
+            # --- THE GOLDEN REVERSAL CONFIRMATION GATES ---
             if len(df) >= 2:
                 snap.rsi_turning_up = float(df["rsi"].iloc[-1]) > float(df["rsi"].iloc[-2])
                 snap.price_breaking_up = snap.close > float(df["high"].iloc[-2])
@@ -291,7 +289,6 @@ class IndicatorEngine:
             # 11. Quant Model Scoring Mappings
             snap.screener_score = self._compute_screener_score(snap)
 
-            # Institutional Setup Qualification Filter
             snap.setup_qualified = (
                 snap.price_above_ema200 and 
                 snap.rsi_in_pullback_zone and 
@@ -318,34 +315,18 @@ class IndicatorEngine:
             return None
 
     def _compute_screener_score(self, s: IndicatorSnapshot) -> float:
-        """Screener ranking score 0-100."""
         score = 0.0
-
-        if s.price_above_ema200:
-            score += 15
-        if s.ema50_slope_rising:
-            score += 10
-        if s.price_above_ema50:
-            score += 8
-        if s.adx_strong:
-            score += 7
-
-        if s.is_healthy_pullback:
-            score += 20
-        if s.at_ema20_support:
-            score += 8
-        if s.at_ema50_support:
-            score += 7
-
-        if s.rsi_crossing_above_50:
-            score += 10
-        if s.entry_candle:
-            score += 8
-        if s.stoch_crossed_bullish_recently:
-            score += 4
-        if s.macd_histogram_rising:
-            score += 3
-
+        if s.price_above_ema200: score += 15
+        if s.ema50_slope_rising: score += 10
+        if s.price_above_ema50: score += 8
+        if s.adx_strong: score += 7
+        if s.is_healthy_pullback: score += 20
+        if s.at_ema20_support: score += 8
+        if s.at_ema50_support: score += 7
+        if s.rsi_crossing_above_50: score += 10
+        if s.entry_candle: score += 8
+        if s.stoch_crossed_bullish_recently: score += 4
+        if s.macd_histogram_rising: score += 3
         return round(score, 1)
 
     def _build_summary(self, s: IndicatorSnapshot) -> str:
@@ -358,14 +339,12 @@ class IndicatorEngine:
         )
 
     def compute_universe(self, universe_data: dict) -> dict:
-        """Compute indicators for all symbols. Returns {symbol: IndicatorSnapshot}."""
         results = {}
         for symbol, df in universe_data.items():
             snap = self.compute(symbol, df)
             if snap:
                 results[symbol] = snap
         return results
-
 
 # Singleton Instantiation Reference
 indicator_engine = IndicatorEngine()

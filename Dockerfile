@@ -2,9 +2,13 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# System deps
+# Set exact timezone to IST so the OS scheduler aligns with the NSE
+ENV TZ="Asia/Kolkata"
+
+# System deps (including tzdata for timezone configuration)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ curl \
+    gcc g++ curl tzdata \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
 # Python deps
@@ -14,11 +18,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # App code
 COPY . .
 
-# Create logs directory
+# Create essential directories
 RUN mkdir -p logs config
 
-# Persist Fyers token and runtime config outside the container filesystem
-VOLUME ["/app/config"]
+# Persist both the auth token (config) AND the SQLite Database (logs)
+VOLUME ["/app/config", "/app/logs"]
 
 # Copy entrypoint script
 COPY entrypoint.sh /app/entrypoint.sh

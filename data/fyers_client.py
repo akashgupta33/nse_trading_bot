@@ -7,7 +7,7 @@ import pandas as pd
 import pytz
 from loguru import logger
 
-from config.settings import settings, MarketTime
+from config.settings import settings
 
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -16,8 +16,8 @@ class FyersClient:
     """Wraps fyers_apiv3 with auto-token management and throttled data pipelines."""
 
     def __init__(self):
-        self.self_fyers = None
-        self.self_token_path = "config/.fyers_token"
+        self.fyers = None
+        self.token_path = "config/.fyers_token"
 
     # =============================================================================
     # # Authentication Management Layer
@@ -61,21 +61,24 @@ class FyersClient:
             return False
 
     def _save_token(self, token: str):
-        data = {"token": token, "date": datetime.now().strftime("%Y-%m-%d")}
-        os.makedirs(os.path.dirname(self.self_token_path), exist_ok=True)
-        with open(self.self_token_path, "w") as f:
+        data = {"token": token, "date": datetime.now(IST).strftime("%Y-%m-%d")}
+        os.makedirs(os.path.dirname(self.token_path), exist_ok=True)
+        with open(self.token_path, "w") as f:
             json.dump(data, f)
 
     def _load_token(self) -> Optional[str]:
-        if not os.path.exists(self.self_token_path):
+        if not os.path.exists(self.token_path):
             return None
-        with open(self.self_token_path, "r") as f:
+        with open(self.token_path, "r") as f:
             data = json.load(f)
+            
         saved_date = data.get("date", "")
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(IST).strftime("%Y-%m-%d")
+        
         if saved_date != today:
             logger.warning("Fyers token is from a previous day - re-auth needed.")
             return None
+            
         return data.get("token")
 
     def connect(self) -> bool:
@@ -88,14 +91,14 @@ class FyersClient:
                 logger.error("No Fyers token. Run authenticate() first.")
                 return False
 
-            self.self_fyers = fyersModel.FyersModel(
+            self.fyers = fyersModel.FyersModel(
                 client_id=settings.fyers_client_id,
                 token=token,
                 log_path="logs/",
             )
 
             # Quick validation
-            profile = self.self_fyers.get_profile()
+            profile = self.fyers.get_profile()
             if profile.get("s") == "ok":
                 logger.success("Fyers client connected.")
                 return True
@@ -114,14 +117,13 @@ class FyersClient:
     def get_historical(
         self,
         symbol: str,
-        days: int = 365,
+        days: int = 220,
         resolution: str = "D",
     ) -> Optional[pd.DataFrame]:
         """
-        Fetch historical OHLCV data by chunking requests into 90-day windows
-        to comply with strict Fyers intraday endpoint boundaries.
+        Fetch historical OHLCV data by chunking requests into safe 90-day windows.
         """
-        if not self.self_fyers:
+        if not self.fyers:
             logger.error("Fyers not connected.")
             return None
 
@@ -139,13 +141,13 @@ class FyersClient:
                 data = {
                     "symbol": symbol,
                     "resolution": str(resolution),
-                    "date_format": "1",  # "1" string format for YYYY-MM-DD strings
+                    "date_format": "1",  # "1" format for YYYY-MM-DD
                     "range_from": current_start.strftime("%Y-%m-%d"),
                     "range_to": current_end.strftime("%Y-%m-%d"),
-                    "cont_flag": 1  # MUST BE AN INTEGER 1, NOT STRING "1"
+                    "cont_flag": 1 
                 }
 
-                response = self.self_fyers.history(data=data)
+                response = self.fyers.history(data=data)
                 
                 if response and response.get("s") == "ok":
                     candles = response.get("candles", [])
@@ -157,20 +159,19 @@ class FyersClient:
                 
                 # Move to the next 90-day block window
                 current_start = current_end + timedelta(days=1)
-                time.sleep(0.1)  # Small pacing pause inside the chunk loop
+                time.sleep(0.12)  # Small pacing pause
 
             if not all_candles:
                 return None
 
-            # Remove duplicates that might happen at the chunk overlap boundaries
+            # Remove duplicates at chunk overlap boundaries
             df = pd.DataFrame(all_candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
             df = df.drop_duplicates(subset=["timestamp"])
             
-            df["date"] = pd.to_datetime(df["timestamp"], unit="s", utc=True).dt.tz_convert(IST)
+            df["date"] = pd.to_datetime(df["timestamp"], unit="s", utc=True).dt.tz_convert(IST).dt.tz_localize(None)
             df = df.drop(columns=["timestamp"])
             df = df.sort_values("date").reset_index(drop=True)
 
-            logger.debug(f"{symbol}: {len(df)} continuous candles aggregated across chunks")
             return df
 
         except Exception as e:
@@ -179,11 +180,11 @@ class FyersClient:
 
     def get_quote(self, symbol: str) -> Optional[dict]:
         """Get current live quote for a symbol."""
-        if not self.self_fyers:
+        if not self.fyers:
             return None
 
         try:
-            response = self.self_fyers.quotes(data={"symbols": symbol})
+            response = self.fyers.quotes(data={"symbols": symbol})
             if response.get("s") != "ok":
                 return None
 
@@ -204,11 +205,11 @@ class FyersClient:
             return None
 
     def get_positions(self) -> list:
-        if not self.self_fyers:
+        if not self.fyers:
             return []
 
         try:
-            response = self.self_fyers.positions()
+            response = self.fyers.positions()
             if response.get("s") != "ok":
                 return []
             return response.get("netPositions", [])
@@ -219,11 +220,11 @@ class FyersClient:
 
     def get_funds(self) -> Optional[float]:
         """Get available cash balance."""
-        if not self.self_fyers:
+        if not self.fyers:
             return None
 
         try:
-            response = self.self_fyers.funds()
+            response = self.fyers.funds()
             if response.get("s") != "ok":
                 return None
 
@@ -240,7 +241,7 @@ class FyersClient:
     # # Throttled Universe Pipeline
     # =============================================================================
 
-    def fetch_universe_data(self, symbols: list, days: int = 365) -> dict:
+    def fetch_universe_data(self, symbols: list, days: int = 220) -> dict:
         """
         Fetch historical data for all universe symbols sequentially.
         Implements high-accuracy rate throttling to bypass broker firewalls.
@@ -252,34 +253,30 @@ class FyersClient:
         
         for idx, sym in enumerate(symbols):
             try:
-                # Instantly clear index tickers or known syntax format anomalies
-                if "INDEX" in sym or "NIFTY50-EQ" in sym or "FOOTWEAR" in sym:
+                # Removed the "INDEX" block so NIFTY50 can be processed successfully
+                if "FOOTWEAR" in sym:
                     continue
                 
-                # Fetch continuous hourly intervals using chunked method
-                df = self.get_historical(sym, days=days, resolution="60")
+                # Fetch DAILY intervals to match the institutional architecture
+                df = self.get_historical(sym, days=days, resolution="D")
                 
                 if df is not None and len(df) >= 50:
                     result[sym] = df
-                    logger.debug(f"[{idx + 1}/{total_symbols}] Synchronized tracking dataframe for {sym}")
                 else:
-                    logger.trace(f"Skipping {sym} - insufficient chronological array length.")
+                    logger.debug(f"Skipping {sym} - insufficient chronological array length.")
                 
-                # --- FIREWALL MITIGATION TIMING BLOCK ---
-                # 150ms micro-pause holds the polling execution frequency safely beneath 
-                # exchange volume ceilings, preventing legacy '400 Bad Request' spikes.
+                # 150ms micro-pause holds the polling execution frequency safely beneath exchange volume ceilings
                 time.sleep(0.15)
                 
-                # Interval logs to show environment terminal feedback activity
                 if (idx + 1) % 25 == 0:
                     logger.info(f"📊 Download Progression Status: {idx + 1}/{total_symbols} processed.")
                     
             except Exception as e:
                 logger.error(f"Disruption mapped on asset processing array loop for {sym}: {e}")
-                time.sleep(0.5)  # Extended reset cooldown on connection pipeline drops
+                time.sleep(0.5)  
                 continue
 
-        logger.info(f"✅ Download Matrix Consolidated: Integrated data structures for {len(result)}/{total_symbols} symbols.")
+        logger.info(f"✅ Download Matrix Consolidated: {len(result)}/{total_symbols} symbols mapped.")
         return result
 
 

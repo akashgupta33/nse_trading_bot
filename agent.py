@@ -8,7 +8,6 @@ from loguru import logger
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
 
 from config.settings import settings, MarketTime
 from data.fyers_client import fyers_client
@@ -360,17 +359,38 @@ def job_eod_review():
 # Entry points
 # ############################################################################
 
+def job_afternoon_sentinel():
+    """Run the pre-close risk sentinel before the daily execution window."""
+    logger.info("=== JOB: PRE-CLOSE RISK SENTINEL (3:05 PM) ===")
+    try:
+        from main_orchestrator import run_afternoon_sentinel
+        run_afternoon_sentinel()
+    except Exception as e:
+        logger.error(f"Pre-close sentinel error: {e}")
+        portfolio_alerter.send(f"⚠️ Pre-close sentinel failed: {str(e)[:200]}")
+
+
+def job_end_of_day():
+    """Run the end-of-day delivery execution pipeline at 3:15 PM."""
+    logger.info("=== JOB: END-OF-DAY INSTITUTIONAL PIPELINE (3:15 PM) ===")
+    try:
+        from main_orchestrator import run_end_of_day_routine
+        run_end_of_day_routine()
+    except Exception as e:
+        logger.error(f"End-of-day pipeline error: {e}")
+        portfolio_alerter.send(f"⚠️ End-of-day pipeline failed: {str(e)[:200]}")
+
+
 def run_now():
-    """Manual trigger - runs full pipeline immediately for testing."""
+    """Manual trigger - runs the new pre-close institutional pipeline immediately."""
     logger.info("Manual run triggered")
     if not fyers_client.connect():
         logger.error("Fyers not connected. Run python auth.py")
         return
-    job_screener()
-    time.sleep(2)
-    job_analyst()
-    time.sleep(2)
-    job_execution()
+    from main_orchestrator import run_afternoon_sentinel, run_end_of_day_routine
+    run_afternoon_sentinel()
+    time.sleep(5)
+    run_end_of_day_routine()
 
 
 def start_scheduler():
@@ -383,25 +403,14 @@ def start_scheduler():
     scheduler = BlockingScheduler(timezone=IST)
     
     scheduler.add_job(job_refresh_auth, CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone=IST), id="auth_refresh")
-    scheduler.add_job(job_screener, CronTrigger(day_of_week="mon-fri", hour=8, minute=45, timezone=IST), id="screener")
-    scheduler.add_job(job_analyst, CronTrigger(day_of_week="mon-fri", hour=9, minute=0, timezone=IST), id="analyst")
-    scheduler.add_job(job_execution, CronTrigger(day_of_week="mon-fri", hour=9, minute=20, timezone=IST), id="execution")
-    scheduler.add_job(job_eod_review, CronTrigger(day_of_week="mon-fri", hour=15, minute=15, timezone=IST), id="eod_review")
-    
-    scheduler.add_job(
-        job_intraday_monitor,
-        IntervalTrigger(minutes=settings.intraday_check_interval_min),
-        id="intraday_monitor",
-        max_instances=1,
-    )
+    scheduler.add_job(job_afternoon_sentinel, CronTrigger(day_of_week="mon-fri", hour=15, minute=5, timezone=IST), id="pre_close_sentinel")
+    scheduler.add_job(job_end_of_day, CronTrigger(day_of_week="mon-fri", hour=15, minute=15, timezone=IST), id="end_of_day")
     
     logger.success(
         "Scheduler ready:\n"
-        "  08:45  Screener\n"
-        "  09:00  Analyst Agent (Claude)\n"
-        "  09:20  Execution Agent (Claude)\n"
-        f"  Every {settings.intraday_check_interval_min} min Intraday monitor\n"
-        "  15:15  EOD review"
+        "  08:00  Token Refresh Check\n"
+        "  15:05  Pre-Close Risk Sentinel\n"
+        "  15:15  End-of-Day Institutional Pipeline"
     )
     
     portfolio_alerter.send("🚀 Portfolio agent started. Monitoring automated.")

@@ -1,33 +1,28 @@
-# Core
+# Core Data & AI
 anthropic>=0.40.0
 pandas>=2.0.0
 numpy>=1.24.0
 
-# Technical indicators
+# Technical Indicators
 pandas-ta==0.4.71b0
 
-# Fyers API
+# Broker & External APIs
 fyers-apiv3>=3.0.0
+yfinance==0.2.37
 
-# Scheduling
-APScheduler>=3.10.0
+# Master Clock
+schedule>=1.2.0
+apscheduler>=3.10.0
 
-# Notifications
-python-telegram-bot>=20.0
-
-# Environment & config
+# Environment & Config
 python-dotenv>=1.0.0
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
 
-# Database
-sqlalchemy>=2.0.0
-
-# HTTP
+# HTTP Networking (Auth & Telegram)
 httpx>=0.25.0
+requests>=2.31.0
 
-# Logging
+# Logging & Timezone
 loguru>=0.7.0
-
-# Timezone
 pytz>=2023.3

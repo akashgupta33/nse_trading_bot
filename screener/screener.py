@@ -39,9 +39,9 @@ class ScreenerAgent:
             if "NIFTY50" in sym:
                 continue
             try:
+                # fyers_client already returns clean, tz-naive data. No further conversion needed.
                 df = fyers_client.get_historical(sym, days=220, resolution="D")
                 if df is not None and not df.empty:
-                    df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
                     universe_data[sym] = df
                 
                 # API rate limit protection
@@ -95,7 +95,7 @@ class ScreenerAgent:
                 logger.warning("Could not fetch Nifty data - assuming market ok to prevent hard block.")
                 return True
                 
-            df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
+            # Compute the indicator snapshot for Nifty50
             snap = indicator_engine.compute(settings.nifty_symbol, df)
             
             if not snap:

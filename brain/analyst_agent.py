@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass, field, asdict
-from typing import Optional
+from typing import Optional, List, Any, Dict
 from loguru import logger
 
 import anthropic
@@ -10,18 +10,18 @@ from config.settings import settings
 class WatchlistStock:
     """A stock selected by the Analyst Agent for the Execution Agent."""
     symbol: str
-    conviction_score: float = 0.0     # 1-10, Claude's confidence
-    entry_zone_low: float = 0.0      # buy anywhere in this range
+    conviction_score: float = 0.0     
+    entry_zone_low: float = 0.0      
     entry_zone_high: float = 0.0
-    stop_loss: float = 0.0           # below pullback low
-    target1: float = 0.0             # first profit target
-    target2: float = 0.0             # second profit target
-    target3: float = 0.0             # let-it-run target
-    thesis: str = ""                 # 2-3 sentence investment case
-    risk_factors: str = ""           # what could go wrong
+    stop_loss: float = 0.0           
+    target1: float = 0.0             
+    target2: float = 0.0             
+    target3: float = 0.0             
+    thesis: str = ""                 
+    risk_factors: str = ""           
     sector: str = ""
-    hold_days_estimate: int = 20     # expected hold period
-    setup_type: str = ""             # "pullback_at_ema20" / "pullback_at_ema50" etc.
+    hold_days_estimate: int = 20     
+    setup_type: str = ""             
     screener_score: float = 0.0
     screener_rank: int = 0
     current_price: float = 0.0
@@ -38,8 +38,7 @@ ANALYST_TOOLS = [
         "name": "get_candidate_list",
         "description": (
             "Get ranked summary of all screener candidates with key metrics: "
-            "screener score, RSI, pullback %, pullback days, ADX, "
-            "EMA support levels, entry candle signal, and R:R ratio. "
+            "screener score, RSI, pullback %, volume, AND fundamental P/E and Sector data. "
             "Call this first to see the full list."
         ),
         "input_schema": {"type": "object", "properties": {}},
@@ -47,9 +46,8 @@ ANALYST_TOOLS = [
     {
         "name": "get_stock_detail",
         "description": (
-            "Get the complete technical snapshot for a specific stock. "
-            "Includes all indicator values, pullback analysis, "
-            "support levels, and suggested entry/stop/target levels."
+            "Get the complete technical and fundamental snapshot for a specific stock. "
+            "Includes all indicator values, support levels, and corporate valuations."
         ),
         "input_schema": {
             "type": "object",
@@ -67,7 +65,7 @@ ANALYST_TOOLS = [
         "description": (
             "Submit your final watchlist of highest conviction stocks. "
             "Call once after completing your analysis. "
-            "Only include stocks you genuinely believe have strong setups."
+            "Only include stocks you genuinely believe have strong technical and fundamental setups."
         ),
         "input_schema": {
             "type": "object",
@@ -93,12 +91,12 @@ ANALYST_TOOLS = [
                         },
                         "required": [
                             "symbol", "conviction_score", "entry_zone_low", 
-                            "entry_zone_high", "stop_loss", "target1", "target2", "thesis"
+                            "entry_zone_high", "stop_loss", "target1", "target2", "target3", "thesis"
                         ],
                     },
                     "minItems": 0,
-                    "maxItems": 5,
-                    "description": "Selected stocks. Submit empty list if nothing meets the bar.",
+                    "maxItems": 4,
+                    "description": "Selected stocks. Submit empty list if nothing meets the strict dual-mandate bar.",
                 }
             },
             "required": ["watchlist"],
@@ -107,44 +105,35 @@ ANALYST_TOOLS = [
 ]
 
 ANALYST_SYSTEM_PROMPT = """You are a senior equity analyst at a top Indian fund house.
-Your job: review screener candidates and identify 1-5 stocks with the strongest
-pullback-in-trend setups for swing trading delivery positions (holding 2-6 weeks).
+Your job: review screener candidates and identify 1-4 stocks with the strongest
+technical setups BACKED BY fundamental health for swing trading (holding 2-6 weeks).
 
-STRATEGY YOU ARE LOOKING FOR - Institutional Pullback:
-- Stock is in a clear uptrend (above EMA200, EMA50 slope rising)
-- Stock has pulled back 3-15% from its recent high over 3-12 days
-- Volume dried up during the pullback (sellers exhausted)
-- Today shows an unmitigated institutional resumption signal: price breaking past previous high with dynamic 1.1x volume confirmation
-- RSI pulled back into the 40-57 zone and has hooked upwards securely (not in free fall)
+DUAL-MANDATE STRATEGY YOU ARE LOOKING FOR:
+1. Technical Base: Stock pulled back, RSI hooked up (40-57), breaking out on 1.1x volume.
+2. Fundamental Filter: Review the P/E ratio, Sector, and Revenue Growth. 
+   - High P/E is acceptable ONLY if it's a high-growth sector.
+   - If fundamental data is missing (N/A), rely entirely on technical volume accumulation.
 
 CONVICTION SCORING GUIDE (1-10):
-9-10: All volume, direction, and structural confirmation gates clear. No trailing decay. Real sector tailwind.
-7-8: Most signals aligned, minor tracking consolidation but overall risk profile remains highly premium.
-5-6: Mixed signals - include only if structural price action confirmation completely bypasses the decay.
+9-10: Perfect technical breakout AND strong fundamental valuation/growth.
+7-8: Great technicals, acceptable or average fundamentals.
+5-6: Good technicals, but poor fundamentals (High risk, avoid unless volume is insane).
 Below 5: Do NOT include under any circumstances.
-
-WHAT YOU MUST CHECK FOR EACH CANDIDATE:
-1. Is the macro trend genuinely intact above the 200 EMA baseline?
-2. Is the pullback healthy or is it an unhedged cascading breakdown?
-3. Are the directional hooks on price high and RSI confirmed turning up?
-4. Entry zone low and high must align neatly within a +/- 1% range of current close.
-5. Stop loss goes safely below the pullback structure floor (calculated via 2.5 * ATR below close).
-6. Target 1 (1:1 R:R), Target 2 (Extended structural swing target zone 3.0 * ATR), and Target 3 must map cleanly.
-7. What is the R:R? Minimum 2:1 required on Target 2 calculations.
-8. What could go wrong? State structural invalidation factors clearly.
 
 PROCESS:
 1. Call get_candidate_list() to see all candidates ranked by screener score.
-2. Deep-dive into top candidates using get_stock_detail().
+2. Deep-dive into top candidates using get_stock_detail() to view fundamentals.
 3. Skip any stock failing the strict confirmation rules.
 4. Call submit_watchlist() with chosen stocks. Empty is completely acceptable if nothing qualifies."""
 
 
 class AnalystAgent:
+    """Evaluates technically screened stocks against fundamental valuation data."""
+
     def __init__(self):
         self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        self.candidates = []
-        self.watchlist = []
+        self.candidates: List[Any] = []
+        self.watchlist: List[Dict[str, Any]] = []
 
     def _execute_tool(self, name: str, inputs: dict) -> str:
         if name == "get_candidate_list":
@@ -159,32 +148,23 @@ class AnalystAgent:
     def _tool_candidate_list(self) -> str:
         rows = []
         for snap in self.candidates:
+            # Safely extract injected fundamental data
+            fund = getattr(snap, "fundamentals", {})
+            sector = fund.get("sector", "N/A")
+            pe = fund.get("trailingPE", "N/A")
+            
             rows.append({
                 "rank": getattr(snap, "screener_rank", 0),
                 "symbol": snap.symbol,
                 "screener_score": snap.screener_score,
                 "close": snap.close,
+                "sector": sector,
+                "trailing_PE": pe,
                 "rsi": snap.rsi,
-                "rsi_crossing_50": getattr(snap, "rsi_crossing_above_50", False),
                 "rsi_turning_up": getattr(snap, "rsi_turning_up", False),
-                "pullback_pct": snap.pullback_pct,
-                "pullback_days": snap.pullback_days,
-                "adx": snap.adx,
-                "at_ema20": snap.at_ema20_support,
-                "at_ema50": snap.at_ema50_support,
-                "entry_candle": snap.entry_candle,
-                "stoch_cross": getattr(snap, "stoch_crossed_bullish_recently", False),
-                "macd_hist_rising": getattr(snap, "macd_histogram_rising", False),
-                "volume_declining_pullback": snap.volume_declining_pullback,
                 "volume_confirmed": getattr(snap, "volume_confirmed", False),
-                "price_breaking_up": getattr(snap, "price_breaking_up", False),
                 "setup_qualified": getattr(snap, "setup_qualified", False),
                 "rr_ratio": snap.rr_ratio,
-                "stop_loss": snap.stop_loss_price,
-                "target1": snap.target1_price,
-                "target2": snap.target2_price,
-                "target3": snap.target3_price,
-                "supertrend": "BULL" if snap.supertrend_bullish else "BEAR",
             })
         return json.dumps(rows, indent=2)
 
@@ -193,17 +173,15 @@ class AnalystAgent:
         if not snap:
             available = [s.symbol for s in self.candidates]
             return json.dumps({"error": f"Symbol '{symbol}' not found in candidates", "available": available})
-        return json.dumps(snap.to_dict(), indent=2)
+        
+        # Combine Technicals and Fundamentals into one clean JSON block
+        data = snap.to_dict()
+        data["fundamentals"] = getattr(snap, "fundamentals", {})
+        return json.dumps(data, indent=2)
 
     def analyse(self, candidates: list) -> list:
         """
-        Run Claude analyst loop on screener candidates.
-        
-        Args:
-            candidates: list of IndicatorSnapshot from screener
-            
-        Returns:
-            list of WatchlistStock objects (0-5 items)
+        Run Claude analyst loop on screener candidates with fundamental injection.
         """
         if not candidates:
             logger.info("Analyst Agent: No candidates found to parse.")
@@ -213,8 +191,8 @@ class AnalystAgent:
         self.watchlist = []
 
         user_msg = (
-            f"I have {len(candidates)} screener candidates for you to review today.\n"
-            f"Market is open. Please analyse them and create the watchlist.\n"
+            f"I have {len(candidates)} mathematically qualified candidates for you to review today.\n"
+            f"Please analyse their technicals and fundamentals to create the optimal watchlist.\n"
             f"Top screener score today: {candidates[0].screener_score:.0f}/100 "
             f"on {candidates[0].symbol}."
         )
@@ -222,7 +200,7 @@ class AnalystAgent:
         messages = [{"role": "user", "content": user_msg}]
         logger.info(f"Analyst Agent starting sequence across {len(candidates)} tokens.")
 
-        for iteration in range(15):
+        for iteration in range(12):
             response = self.client.messages.create(
                 model="claude-3-5-sonnet-20241022",
                 max_tokens=4000,
@@ -231,7 +209,6 @@ class AnalystAgent:
                 messages=messages
             )
 
-            logger.debug(f"Analyst iteration {iteration+1}: {response.stop_reason}")
             messages.append({"role": "assistant", "content": response.content})
 
             if response.stop_reason == "end_turn":
@@ -252,15 +229,15 @@ class AnalystAgent:
                 if tool_results:
                     messages.append({"role": "user", "content": tool_results})
 
-            if self.watchlist is not None and "submit_watchlist" in str(
-                [b.name for b in response.content if hasattr(b, "name")]
-            ):
+            if self.watchlist and "submit_watchlist" in str([getattr(b, "name", "") for b in response.content]):
                 break
 
         # Convert raw tool dictionary returns to clean WatchlistStock objects
         result = []
         for item in self.watchlist:
             snap = next((s for s in candidates if s.symbol == item.get("symbol")), None)
+            fund = getattr(snap, "fundamentals", {}) if snap else {}
+            
             ws = WatchlistStock(
                 symbol=item.get("symbol", ""),
                 conviction_score=item.get("conviction_score", 0),
@@ -272,9 +249,9 @@ class AnalystAgent:
                 target3=item.get("target3", 0),
                 thesis=item.get("thesis", ""),
                 risk_factors=item.get("risk_factors", ""),
-                sector=item.get("sector", ""),
-                hold_days_estimate=item.get("hold_days_estimate", 20),
-                setup_type=item.get("setup_type", "pullback"),
+                sector=item.get("sector", fund.get("sector", "Unknown")),
+                hold_days_estimate=item.get("hold_days_estimate", 21),
+                setup_type=item.get("setup_type", "institutional_pullback"),
                 screener_score=snap.screener_score if snap else 0,
                 screener_rank=snap.screener_rank if snap else 0,
                 current_price=snap.close if snap else 0,
@@ -284,15 +261,17 @@ class AnalystAgent:
         # Sort watch matrix by strict descending conviction priority
         result.sort(key=lambda x: x.conviction_score, reverse=True)
 
-        logger.info(
-            f"Analyst complete: {len(result)} stocks selected\n" +
-            "\n".join(
-                f" {ws.symbol}: conviction={ws.conviction_score} | "
-                f"entry ₹{ws.entry_zone_low}-₹{ws.entry_zone_high} | "
-                f"stop ₹{ws.stop_loss} | {ws.thesis[:60]}..."
-                for ws in result
+        if result:
+            logger.success(
+                f"Analyst complete: {len(result)} stocks selected\n" +
+                "\n".join(
+                    f"  {ws.symbol}: Conviction={ws.conviction_score}/10 | "
+                    f"Target 2: ₹{ws.target2} | Stop: ₹{ws.stop_loss} | {ws.sector}"
+                    for ws in result
+                )
             )
-        )
+        else:
+            logger.warning("Analyst complete: 0 stocks met the Dual-Mandate standard today.")
 
         return result
 

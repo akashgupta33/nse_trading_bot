@@ -14,7 +14,7 @@ TWO MODES:
 Setup:
   1. Add FYERS_TOTP_SECRET to .env (from Fyers 2FA setup)
      OR set FYERS_PIN in .env (your Fyers login PIN)
-  2. Schedule this script to run at 8:50 AM Mon-Fri
+  2. Scheduled natively in scheduler.py to run at 8:00 AM Mon-Fri.
 
 Usage:
   python auto_auth.py        # run manually
@@ -72,7 +72,7 @@ def auto_auth_totp() -> bool:
     
     # App ID is the part before the hyphen in client_id e.g. "XYZ123" from "XYZ123-100"
     app_id = os.getenv("FYERS_APP_ID", client_id.split("-")[0])
-    pin = os.getenv("FYERS_PIN", "")  # Changed from PASSWORD to PIN
+    pin = os.getenv("FYERS_PIN", "")  
     pan_or_dob = os.getenv("FYERS_PAN_DOB", "")
     totp_secret = os.getenv("FYERS_TOTP_SECRET", "")
     redirect_uri = settings.fyers_redirect_uri
@@ -91,11 +91,11 @@ def auto_auth_totp() -> bool:
             "Content-Type": "application/json"
         }
 
-        # Step 1: Send client_id + PIN (as password field in API)
+        # Step 1: Send client_id + PIN
         payload1 = {
             "fy_id": pan_or_dob,
             "app_id": app_id,
-            "password": pin  # Fyers API accepts PIN in password field
+            "password": pin  
         }
         r = session.post("https://api-t1.fyers.in/vagator/v2/send_login_otp_v2", json=payload1, headers=headers, timeout=10)
         
@@ -108,7 +108,6 @@ def auto_auth_totp() -> bool:
         # Step 2: TOTP verification
         logger.info("TOTP auth: Step 2 - TOTP verification")
         totp_code = get_totp_code(totp_secret)
-        logger.debug(f"Generated TOTP: {totp_code}")
 
         payload2 = {
             "request_key": request_key,
@@ -124,7 +123,7 @@ def auto_auth_totp() -> bool:
 
         # Step 3: PIN verification
         logger.info("IDIP auth: Step 3 - PIN verification")
-        pin_hash = hashlib.sha256(pin.encode()).hexdigest()  # Hash the actual PIN
+        pin_hash = hashlib.sha256(pin.encode()).hexdigest()  
         
         payload3 = {
             "request_key": request_key,
@@ -160,7 +159,6 @@ def auto_auth_totp() -> bool:
         r = session.post("https://api.fyers.in/api/v3/token", json=payload4, headers=headers_auth, timeout=10)
 
         if r.status_code != 302:
-            # Try parsing auth code from URL
             uri = r.json().get("location", "")
             auth_code = _extract_auth_code(uri)
             if not auth_code and r.status_code == 200:
@@ -173,8 +171,6 @@ def auto_auth_totp() -> bool:
         if not auth_code:
             logger.error(f"Could not extract auth_code. Response: {r.text[:300]}")
             return False
-
-        logger.info(f"Got auth_code: {auth_code[:8]}...")
 
         # Step 5: Exchange for access token
         logger.info("TOTP auth: Step 5 - exchanging for access token")
@@ -217,23 +213,18 @@ def _extract_auth_code(url: str) -> str:
 
 
 def _save_token(token: str):
+    """Saves token with strict IST timezone to prevent midnight rollover bugs."""
     TOKEN_PATH.parent.mkdir(exist_ok=True)
-    data = {"token": token, "date": datetime.now().strftime("%Y-%m-%d")}
+    data = {"token": token, "date": datetime.now(IST).strftime("%Y-%m-%d")}
     TOKEN_PATH.write_text(json.dumps(data))
-    logger.info(f"Token saved to {TOKEN_PATH}")
+    logger.info(f"Token saved to {TOKEN_PATH} for date: {data['date']}")
 
 
 # =============================================================================
 # # Mode B: Telegram-assisted auth (semi-automated fallback)
 # =============================================================================
 def telegram_auth_request() -> bool:
-    """
-    Sends the auth URL to your Telegram.
-    You click the link, login, and the agent catches the redirect
-    via a tiny local HTTP server.
-    """
     import http.server
-    import threading
     import urllib.parse
     from fyers_apiv3.fyersModel import SessionModel
 
@@ -245,8 +236,6 @@ def telegram_auth_request() -> bool:
         grant_type="authorization_code"
     )
     auth_url = sess.generate_authcode()
-
-    # Log the auth URL so it can be opened manually if Telegram click fails
     logger.info(f"Fyers auth URL: {auth_url}")
 
     msg = (
@@ -262,93 +251,53 @@ def telegram_auth_request() -> bool:
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-                        parsed = urllib.parse.urlparse(self.path)
-                        params = urllib.parse.parse_qs(parsed.query)
-                        code = params.get("auth_code", params.get("code", [None]))[0]
-                        if code:
-                                auth_code_holder[0] = code
-                                self.send_response(200)
-                                self.send_header("Content-Type", "text/html")
-                                self.end_headers()
-                                self.wfile.write(b"<h1>Auth successful! Return to terminal.</h1>")
-                                return
-
-                        # If code not in query (some providers return it in fragment),
-                        # serve a tiny HTML page that extracts the fragment and POSTs it back.
-                        self.send_response(200)
-                        self.send_header("Content-Type", "text/html")
-                        self.end_headers()
-                        html = b"""
-<html>
-    <head><meta charset="utf-8"><title>Auth callback</title></head>
-    <body>
-        <h1>Completing authentication...</h1>
-        <p>If your browser doesn't return to the app, click the button below.</p>
-        <button id="send">Send auth to app</button>
-        <script>
-            function postBody(body) {
-                fetch('/_capture', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)}).then(()=>{
-                    document.body.innerHTML = '<h1>Auth captured. You can close this tab.</h1>';
-                }).catch(()=>{
-                    document.body.innerHTML = '<h1>Failed to send auth to app. Please copy the URL and paste it to the terminal.</h1>';
-                });
-            }
-            (function(){
-                try {
-                    var params = new URLSearchParams(window.location.search);
-                    var code = params.get('auth_code') || params.get('code');
-                    if (code) { postBody({code: code}); return; }
-                    // Try fragment
-                    var frag = window.location.hash.substring(1);
-                    var fragParams = new URLSearchParams(frag);
-                    var fcode = fragParams.get('auth_code') || fragParams.get('code');
-                    if (fcode) { postBody({code: fcode}); return; }
-                } catch (e) { }
-                document.getElementById('send').addEventListener('click', function(){
-                    // attempt to send whatever we can
-                    var frag = window.location.hash.substring(1);
-                    var fragParams = new URLSearchParams(frag);
-                    var fcode = fragParams.get('auth_code') || fragParams.get('code') || null;
-                    postBody({code: fcode, url: window.location.href});
-                });
-            })();
-        </script>
-    </body>
-</html>
-"""
-                        self.wfile.write(html)
-
-        def log_message(self, format, *args):
-            pass  # Suppress server logs
-
-        def do_POST(self):
-            # Capture JSON POSTs from the HTML page's JS with the auth code
-            if self.path != '/_capture':
-                self.send_response(404)
-                self.end_headers()
-                return
-            length = int(self.headers.get('Content-Length', 0))
-            raw = self.rfile.read(length) if length else b''
-            try:
-                data = json.loads(raw.decode('utf-8')) if raw else {}
-            except Exception:
-                data = {}
-            code = data.get('code') or ''
-            # Also accept full URL fallback
-            if not code and data.get('url'):
-                code = _extract_auth_code(data.get('url'))
+            parsed = urllib.parse.urlparse(self.path)
+            params = urllib.parse.parse_qs(parsed.query)
+            code = params.get("auth_code", params.get("code", [None]))[0]
             if code:
                 auth_code_holder[0] = code
                 self.send_response(200)
-                self.send_header('Content-Type', 'text/html')
+                self.send_header("Content-Type", "text/html")
                 self.end_headers()
-                self.wfile.write(b'<h1>Auth captured. Return to the app.</h1>')
-            else:
-                self.send_response(400)
+                self.wfile.write(b"<h1>Auth successful! Return to terminal.</h1>")
+                return
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            html = b"""
+            <html>
+                <head><meta charset="utf-8"><title>Auth callback</title></head>
+                <body>
+                    <h1>Completing authentication...</h1>
+                    <script>
+                        var code = new URLSearchParams(window.location.search).get('auth_code') || 
+                                   new URLSearchParams(window.location.hash.substring(1)).get('auth_code');
+                        if (code) {
+                            fetch('/_capture', {method: 'POST', body: JSON.stringify({code: code})})
+                            .then(()=> document.body.innerHTML = '<h1>Auth captured! Close this tab.</h1>');
+                        }
+                    </script>
+                </body>
+            </html>
+            """
+            self.wfile.write(html)
+
+        def log_message(self, format, *args):
+            pass 
+
+        def do_POST(self):
+            if self.path != '/_capture': return
+            length = int(self.headers.get('Content-Length', 0))
+            data = json.loads(self.rfile.read(length)) if length else {}
+            code = data.get('code')
+            if code:
+                auth_code_holder[0] = code
+                self.send_response(200)
                 self.end_headers()
 
     server = http.server.HTTPServer(("0.0.0.0", 8080), Handler)
-    server.timeout = 300  # 5 minutes to complete login
+    server.timeout = 300 
     
     logger.info("Waiting up to 5 minutes for Fyers callback on port 8080...")
     server.handle_request()
@@ -361,13 +310,11 @@ def telegram_auth_request() -> bool:
     sess.set_token(auth_code)
     resp = sess.generate_token()
     if resp.get("s") != "ok":
-        logger.error(f"Token generation failed: {resp}")
         return False
 
     token = resp["access_token"]
     _save_token(token)
     _send_telegram("✅ <b>Fyers re-auth successful!</b> Agent is ready for today.")
-    logger.success("Telegram-assisted auth successful")
     return True
 
 
@@ -384,9 +331,6 @@ def _send_telegram(msg: str):
         pass
 
 
-# =============================================================================
-# # Verify token works
-# =============================================================================
 def verify_token() -> bool:
     """Quick check that the saved token is valid."""
     try:
@@ -395,48 +339,44 @@ def verify_token() -> bool:
         if ok:
             logger.success("Token verified - Fyers connection healthy")
             return True
-        else:
-            logger.error("Token verification failed")
-            return False
+        return False
     except Exception as e:
         logger.error(f"Verify errors: {e}")
         return False
 
 
 # =============================================================================
-# # Entry point
+# # Scheduler Integration Wrapper
 # =============================================================================
-def main():
-    parser = argparse.ArgumentParser(description="Auto-authenticate with Fyers")
-    parser.add_argument("--test", action="store_true", help="Only verify existing token")
-    parser.add_argument("--mode", choices=["totp", "telegram"], default="totp",
-                        help="Auth modes: totp (headless) or telegram (semi-auto)")
-    args = parser.parse_args()
-
-    if args.test:
-        ok = verify_token()
-        sys.exit(0 if ok else 1)
-
-    logger.info(f"Auto-auth starting | mode={args.mode} | {datetime.now(IST).strftime('%H:%M IST')}")
-
-    success = False
-    if args.mode == "totp":
-        success = auto_auth_totp()
-        if not success:
-            logger.warning("TOTP auth failed - falling back to Telegram mode")
-            success = telegram_auth_request()
-    else:
+def generate_token() -> bool:
+    """
+    Unified entry point for scheduler.py.
+    Attempts headless TOTP first, falls back to Telegram Auth.
+    """
+    logger.info(f"Auto-auth pipeline triggered | {datetime.now(IST).strftime('%H:%M IST')}")
+    success = auto_auth_totp()
+    if not success:
+        logger.warning("TOTP auth failed - escalating to Telegram manual intervention.")
         success = telegram_auth_request()
 
     if success:
-        verify_token()
-        sys.exit(0)
+        return verify_token()
     else:
-        msg = "❌ <b>Fyers auto-auth FAILED</b> - agent will not trade today"
+        msg = "❌ <b>Fyers auto-auth FAILED</b> - System will be locked out of market data today."
         logger.error(msg)
         _send_telegram(msg)
-        sys.exit(1)
+        return False
 
 
+# =============================================================================
+# # Manual Terminal Entry
+# =============================================================================
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Auto-authenticate with Fyers")
+    parser.add_argument("--test", action="store_true", help="Only verify existing token")
+    args = parser.parse_args()
+
+    if args.test:
+        sys.exit(0 if verify_token() else 1)
+
+    sys.exit(0 if generate_token() else 1)

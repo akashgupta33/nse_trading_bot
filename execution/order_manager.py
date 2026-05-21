@@ -5,7 +5,8 @@ from typing import Optional
 from loguru import logger
 import pytz
 
-from config.settings import settings, indicator_config as C
+from config.settings import settings
+from utils.logger import trade_db  # Import our SQLite Database!
 
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -22,9 +23,9 @@ class Position:
         target1: float,
         target2: float,
         target3: float,
-        atr: float,
-        entry_time: Optional[datetime] = None,
         reason: str = "",
+        conviction: float = 0.0,
+        entry_time: Optional[datetime] = None,
     ):
         self.symbol = symbol
         self.entry_price = entry_price
@@ -38,10 +39,14 @@ class Position:
         self.target2 = target2
         self.target3 = target3
         
-        self.atr = atr
         self.entry_time = entry_time or datetime.now(IST)
         self.reason = reason
+        self.conviction = conviction
+        
+        # State Tracking for Claude's Sentinel Desks
         self.target1_hit = False
+        self.target2_hit = False
+        self.stagnation_reviewed = False
 
     def to_dict(self) -> dict:
         return {
@@ -54,10 +59,12 @@ class Position:
             "target1": self.target1,
             "target2": self.target2,
             "target3": self.target3,
-            "atr": self.atr,
             "entry_time": self.entry_time.isoformat(),
             "reason": self.reason,
+            "conviction": self.conviction,
             "target1_hit": self.target1_hit,
+            "target2_hit": self.target2_hit,
+            "stagnation_reviewed": self.stagnation_reviewed,
         }
 
     def unrealised_pnl(self, current_price: float) -> float:
@@ -67,62 +74,12 @@ class Position:
         return ((current_price - self.entry_price) / self.entry_price) * 100
 
 
-class RiskGuard:
-    """Enforces Turtle Trader Risk Parity constraints across active cash balances."""
-
-    def check_new_entry(self, snapshot, capital: float, current_positions_count: int) -> tuple[bool, str]:
-        """Returns (allowed, reason) after verifying structural verification boundaries."""
-        # 1. Verify the setup has qualified past our 5 volume/direction gates
-        if not getattr(snapshot, "setup_qualified", False):
-            return False, "Technical confirmation gates rejected setup (RSI or volume confirmation missing)"
-
-        # 2. Portfolio Slot Boundary Constraint Check
-        if current_positions_count >= settings.max_positions:
-            return False, f"Portfolio matrix full ({current_positions_count}/{settings.max_positions} slots occupied)"
-
-        # 3. Prevent zero division tracking errors
-        if snapshot.atr <= 0:
-            return False, "ATR value is zero - cannot build structural volatility stop loss floor"
-
-        # 4. Quantity Validation Math
-        stop_dist = snapshot.close - snapshot.stop_loss_price
-        if stop_dist <= 0:
-            return False, f"Invalid stop loss boundary structure distance: {stop_dist:.2f}"
-
-        # 5. Asset Position Allocation Check
-        cash_at_risk = capital * (settings.risk_per_trade_pct / 100)
-        qty = math.floor(cash_at_risk / stop_dist)
-        if qty <= 0:
-            return False, f"Calculated position unit allocation evaluates to 0. Risk envelope too compressed."
-
-        return True, "All quantitative risk parameters cleared."
-
-    def calculate_quantity(self, close_price: float, stop_loss_price: float, total_equity: float) -> int:
-        """Calculates strict Risk Parity share volume bound by a hard 1/4 slot cost ceiling."""
-        stop_dist = close_price - stop_loss_price
-        if stop_dist <= 0:
-            return 0
-
-        # Calculate base unit parity size (1.5% max account risk allocation)
-        cash_at_risk = total_equity * (settings.risk_per_trade_pct / 100)
-        qty = math.floor(cash_at_risk / stop_dist)
-        position_cost = qty * close_price
-
-        # Enforce maximum single slot cost ceiling (Total Equity / Max Positions)
-        max_slot_cost = total_equity / settings.max_positions
-        if position_cost > max_slot_cost:
-            qty = math.floor(max_slot_cost / close_price)
-
-        return max(0, qty)
-
-
 class OrderManager:
     """Manages live order routing via Fyers socket layers or local simulation logs."""
 
     def __init__(self):
         self.positions = {}        # Active positions tracking dictionary: {symbol: Position}
         self.trade_log = []
-        self.risk = RiskGuard()
 
     @property
     def has_active_positions(self) -> bool:
@@ -136,64 +93,62 @@ class OrderManager:
     # # Entry Routines
     # =============================================================================
 
-    def enter_trade(self, snapshot, reason: str = "") -> Optional[dict]:
-        """Validates indicators and submits new orders to the delivery engine pipeline."""
-        if snapshot.symbol in self.positions:
-            logger.warning(f"Aborting execution: Position track already active for {snapshot.symbol}")
-            return None
-
-        # Fetch active capital metrics base
-        capital = self._get_active_capital_base()
+    def enter_trade_from_watchlist(
+        self, symbol: str, entry_price: float, quantity: int,
+        stop_loss: float, target1: float, target2: float, target3: float,
+        reason: str, conviction: float
+    ) -> Optional[dict]:
+        """Validates bounds and submits new orders routed from the Execution Agent."""
         
-        allowed, msg = self.risk.check_new_entry(snapshot, capital, len(self.positions))
-        if not allowed:
-            logger.warning(f"RiskGuard BLOCKED execution for {snapshot.symbol}: {msg}")
+        if symbol in self.positions:
+            logger.warning(f"Aborting execution: Position track already active for {symbol}")
             return None
 
-        qty = self.risk.calculate_quantity(snapshot.close, snapshot.stop_loss_price, capital)
-        if qty <= 0:
-            logger.warning(f"Risk module calculated empty trade size for {snapshot.symbol}. Aborting.")
+        if len(self.positions) >= settings.max_positions:
+            logger.warning(f"Portfolio matrix full ({len(self.positions)}/{settings.max_positions} slots). Aborting {symbol}.")
             return None
 
-        price = snapshot.close
-        logger.info(f"🚀 [ENTRY CRON INITIALIZED] {snapshot.symbol} | Qty={qty} @ Price=₹{price}")
+        if quantity <= 0:
+            logger.warning(f"Execution Agent passed quantity of 0 for {symbol}. Aborting.")
+            return None
+
+        logger.info(f"🚀 [ENTRY INITIALIZED] {symbol} | Qty={quantity} @ Price=₹{entry_price}")
 
         # Routing to Live vs Paper Environment
         order_id = f"SIM-{datetime.now(IST).strftime('%Y%m%d%H%M%S')}"
-        actual_price = price
+        actual_price = entry_price
 
         if settings.is_live:
-            order_result = self._place_live_order(snapshot.symbol, qty, "BUY")
+            order_result = self._place_live_order(symbol, quantity, "BUY")
             if not order_result:
-                logger.error(f"Fyers execution rejection generated on broker bridge for {snapshot.symbol}")
+                logger.error(f"Fyers execution rejection generated on broker bridge for {symbol}")
                 return None
             order_id = order_result.get("order_id", order_id)
-            actual_price = order_result.get("avg_price", price) if order_result.get("avg_price", 0) > 0 else price
+            actual_price = order_result.get("avg_price", entry_price) if order_result.get("avg_price", 0) > 0 else entry_price
 
         # Open Position object tracking reference
         pos = Position(
-            symbol=snapshot.symbol,
+            symbol=symbol,
             entry_price=actual_price,
-            quantity=qty,
-            stop_loss=snapshot.stop_loss_price,
-            target1=snapshot.target1_price,
-            target2=snapshot.target2_price,
-            target3=snapshot.target3_price,
-            atr=snapshot.atr,
+            quantity=quantity,
+            stop_loss=stop_loss,
+            target1=target1,
+            target2=target2,
+            target3=target3,
             reason=reason,
+            conviction=conviction
         )
-        self.positions[snapshot.symbol] = pos
+        self.positions[symbol] = pos
 
         trade_record = {
             "type": "ENTRY",
-            "symbol": snapshot.symbol,
-            "price": actual_price,
-            "qty": qty,
-            "stop_loss": snapshot.stop_loss_price,
-            "target1": snapshot.target1_price,
-            "target2": snapshot.target2_price,
-            "target3": snapshot.target3_price,
-            "atr": snapshot.atr,
+            "symbol": symbol,
+            "entry_price": actual_price,
+            "qty": quantity,
+            "stop_loss": stop_loss,
+            "target1": target1,
+            "target2": target2,
+            "target3": target3,
             "reason": reason,
             "timestamp": datetime.now(IST).isoformat(),
             "order_id": order_id,
@@ -201,7 +156,9 @@ class OrderManager:
         }
 
         self.trade_log.append(trade_record)
-        logger.success(f"✅ [ENTRY RECORDED] {snapshot.symbol} allocation deployed successfully.")
+        trade_db.log_trade(trade_record)  # Persist to SQLite
+        
+        logger.success(f"✅ [ENTRY RECORDED] {symbol} allocation deployed successfully.")
         return trade_record
 
     # =============================================================================
@@ -209,7 +166,7 @@ class OrderManager:
     # =============================================================================
 
     def exit_trade_portfolio(self, symbol: str, current_price: float, reason: str = "signal_exit") -> Optional[dict]:
-        """Liquidates remaining asset units, adjusting the balance pool cleanly."""
+        """Liquidates remaining asset units (100% exit), adjusting the balance pool cleanly."""
         pos = self.positions.get(symbol)
         if not pos:
             logger.warning(f"Request dropped: No active tracking object matching {symbol}")
@@ -229,7 +186,6 @@ class OrderManager:
             order_id = order_result.get("order_id", order_id)
             actual_price = order_result.get("avg_price", current_price) if order_result.get("avg_price", 0) > 0 else current_price
 
-        # Accurate PnL calculations linked explicitly to final remaining volumes
         pnl = (actual_price - pos.entry_price) * qty_to_liquidate
         pnl_pct = ((actual_price - pos.entry_price) / pos.entry_price) * 100
 
@@ -249,23 +205,23 @@ class OrderManager:
         }
 
         self.trade_log.append(trade_record)
+        trade_db.log_trade(trade_record)  # Persist to SQLite
         del self.positions[symbol]
         
         logger.info(f"🚪 [PORTFOLIO SLOT CLEARED] Closed {symbol} Net PnL: ₹{pnl:.2f} ({pnl_pct:.2f}%)")
         return trade_record
 
-    def partial_exit(self, symbol: str, current_price: float, qty_to_sell: int, reason: str = "target1_hit") -> Optional[dict]:
+    def partial_exit(self, symbol: str, current_price: float, qty_to_sell: int, reason: str = "target_hit") -> Optional[dict]:
         """Liquidates an explicit percentage allocation without dropping the structural tracking layer."""
         pos = self.positions.get(symbol)
         if not pos:
             return None
 
-        # Absolute constraint safety bounds check
         qty = min(qty_to_sell, pos.qty_remaining)
         if qty <= 0:
             return None
 
-        logger.info(f"💵 [PARTIAL DEPLOYMENT EXECUTED] Shaving {qty} shares from {symbol} position array. Target: {reason}")
+        logger.info(f"💵 [PARTIAL DEPLOYMENT EXECUTED] Shaving {qty} shares from {symbol}. Reason: {reason}")
 
         actual_price = current_price
         order_id = f"SIM-PE-{datetime.now(IST).strftime('%Y%m%d%H%M%S')}"
@@ -280,10 +236,6 @@ class OrderManager:
         
         # Deduct volume cleanly from our tracking states
         pos.qty_remaining -= qty
-        pos.target1_hit = True
-        
-        # Pull structural stop floor to breakeven parameter bounds
-        pos.trailing_stop = max(pos.trailing_stop, pos.entry_price)
 
         record = {
             "type": "PARTIAL_EXIT",
@@ -292,14 +244,18 @@ class OrderManager:
             "qty": qty,
             "pnl": round(pnl, 2),
             "reason": reason,
-            "remaining_qty": pos.qty_remaining,
-            "new_stop": pos.trailing_stop,
             "order_id": order_id,
             "timestamp": datetime.now(IST).isoformat(),
         }
 
         self.trade_log.append(record)
+        trade_db.log_trade(record)  # Persist to SQLite
         logger.info(f"⚖️ [PORTFOLIO BALANCE UPDATED] Partials cleared for {symbol}. Adjusted floor: ₹{pos.trailing_stop}")
+        
+        # If we accidentally sold everything due to rounding, clear the slot fully
+        if pos.qty_remaining <= 0:
+            del self.positions[symbol]
+            
         return record
 
     # =============================================================================
@@ -317,7 +273,7 @@ class OrderManager:
                 "qty": qty,
                 "type": 3,              # 3 = Direct Market Execution routing
                 "side": 1 if side == "BUY" else -1,
-                "productType": "CNC",   # INSTITUTIONAL SWING DELIVERY SETTING (Changed from INTRADAY)
+                "productType": "CNC",   # INSTITUTIONAL SWING DELIVERY
                 "limitPrice": 0,
                 "stopPrice": 0,
                 "validity": "DAY",
@@ -325,7 +281,7 @@ class OrderManager:
                 "offlineOrder": "False",
             }
 
-            response = fyers_client.self_fyers.place_order(data=order_data)
+            response = fyers_client.fyers.place_order(data=order_data)
             if response and response.get("s") == "ok":
                 return {"order_id": response.get("id"), "avg_price": 0, "status": "placed"}
             else:
@@ -339,28 +295,11 @@ class OrderManager:
     # # System Ingestion Getters
     # =============================================================================
 
-    def _get_active_capital_base(self) -> float:
-        """Returns liquid cash plus the market valuation of open asset arrays."""
-        if not settings.is_live:
-            return settings.capital
-            
-        try:
-            from data.fyers_client import fyers_client
-            live_cash = fyers_client.get_funds()
-            if live_cash is not None:
-                return float(live_cash)
-        except Exception as e:
-            logger.error(f"Error reading live cash balances: {e}")
-        return settings.capital
-
     def get_trade_log(self) -> list:
         return self.trade_log.copy()
 
     def get_daily_pnl(self) -> float:
         return round(sum(t.get("pnl", 0.0) for t in self.trade_log if t.get("type") in ["EXIT", "PARTIAL_EXIT"]), 2)
-
-    def has_position_symbol(self, symbol: str) -> bool:
-        return symbol in self.positions
 
 
 # Unified Singleton Instance Reference Mapping
