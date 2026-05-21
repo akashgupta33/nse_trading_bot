@@ -19,7 +19,8 @@ from monitor.alerting import portfolio_alerter, trade_db
 
 
 def job_refresh_auth():
-    """Refresh Fyers auth daily at 8:00 AM. Check token first, use Telegram if expired."""
+    """Refresh Fyers auth before market open, before midday, and before midnight.
+    Check token first; use Telegram if expired."""
     logger.info("=== JOB: FYERS AUTH REFRESH ===")
     try:
         from auto_auth import verify_token, telegram_auth_request
@@ -402,13 +403,20 @@ def start_scheduler():
         
     scheduler = BlockingScheduler(timezone=IST)
     
-    scheduler.add_job(job_refresh_auth, CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone=IST), id="auth_refresh")
+    # Token expires at 00:00 (midnight) each day, so refresh AFTER midnight to get full 24-hour validity
+    scheduler.add_job(job_refresh_auth, CronTrigger(day_of_week="mon-fri", hour=0, minute=5, timezone=IST), id="auth_refresh_postmidnight")
+    # Backup check before market open
+    scheduler.add_job(job_refresh_auth, CronTrigger(day_of_week="mon-fri", hour=8, minute=0, timezone=IST), id="auth_refresh_morning")
+    # Optional midday check if token somehow expired
+    scheduler.add_job(job_refresh_auth, CronTrigger(day_of_week="mon-fri", hour=11, minute=55, timezone=IST), id="auth_refresh_midday")
     scheduler.add_job(job_afternoon_sentinel, CronTrigger(day_of_week="mon-fri", hour=15, minute=5, timezone=IST), id="pre_close_sentinel")
     scheduler.add_job(job_end_of_day, CronTrigger(day_of_week="mon-fri", hour=15, minute=15, timezone=IST), id="end_of_day")
     
     logger.success(
         "Scheduler ready:\n"
-        "  08:00  Token Refresh Check\n"
+        "  00:05  Token Refresh (after midnight, ensures 24-hour validity)\n"
+        "  08:00  Token Refresh (backup before market open)\n"
+        "  11:55  Token Refresh (backup before market close prep)\n"
         "  15:05  Pre-Close Risk Sentinel\n"
         "  15:15  End-of-Day Institutional Pipeline"
     )
