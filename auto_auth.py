@@ -15,10 +15,6 @@ Setup:
   1. Add FYERS_TOTP_SECRET to .env (from Fyers 2FA setup)
      OR set FYERS_PIN in .env (your Fyers login PIN)
   2. Scheduled natively in scheduler.py to run at 8:00 AM Mon-Fri.
-
-Usage:
-  python auto_auth.py        # run manually
-  python auto_auth.py --test  # verify token works without trading
 """
 
 import os
@@ -53,12 +49,9 @@ TOKEN_PATH = Path("config/.fyers_token")
 def get_totp_code(secret: str) -> str:
     """Generate TOTP code from secret (same as Google Authenticator)."""
     import base64
-    # Decode base32 secret
     key = base64.b32decode(secret.upper().replace(" ", ""), casefold=True)
-    # Current 30-second interval
     t = int(time.time()) // 30
     msg = struct.pack(">Q", t)
-    # HMAC-SHA1
     h = hmac.new(key, msg, "sha1").digest()
     offset = h[-1] & 0x0F
     code = struct.unpack(">I", h[offset:offset + 4])[0] & 0x7FFFFFFF
@@ -67,10 +60,7 @@ def get_totp_code(secret: str) -> str:
 
 def auto_auth_totp() -> bool:
     """Headless automated auth using Fyers credentials + TOTP."""
-    logger.info("Starting Step 1 - Client login")
     client_id = settings.fyers_client_id
-    
-    # App ID is the part before the hyphen in client_id e.g. "XYZ123" from "XYZ123-100"
     app_id = os.getenv("FYERS_APP_ID", client_id.split("-")[0])
     pin = os.getenv("FYERS_PIN", "")  
     pan_or_dob = os.getenv("FYERS_PAN_DOB", "")
@@ -79,10 +69,11 @@ def auto_auth_totp() -> bool:
     secret_key = settings.fyers_secret_key
 
     if not all([pin, pan_or_dob, totp_secret]):
-        logger.warning("TOTP auto-auth needs FYERS_PIN, FYERS_PAN_DOB, FYERS_TOTP_SECRET in .env")
+        logger.debug("TOTP credentials missing in .env. Skipping Mode A.")
         return False
 
     try:
+        logger.info("Attempting Mode A: Headless TOTP Login...")
         session = requests.Session()
         headers = {
             "Accept": "application/json",
@@ -92,11 +83,7 @@ def auto_auth_totp() -> bool:
         }
 
         # Step 1: Send client_id + PIN
-        payload1 = {
-            "fy_id": pan_or_dob,
-            "app_id": app_id,
-            "password": pin  
-        }
+        payload1 = {"fy_id": pan_or_dob, "app_id": app_id, "password": pin}
         r = session.post("https://api-t1.fyers.in/vagator/v2/send_login_otp_v2", json=payload1, headers=headers, timeout=10)
         
         if r.status_code != 200 or not r.json().get("s") == "ok":
@@ -106,13 +93,8 @@ def auto_auth_totp() -> bool:
         request_key = r.json().get("request_key", "")
 
         # Step 2: TOTP verification
-        logger.info("TOTP auth: Step 2 - TOTP verification")
         totp_code = get_totp_code(totp_secret)
-
-        payload2 = {
-            "request_key": request_key,
-            "otp": totp_code
-        }
+        payload2 = {"request_key": request_key, "otp": totp_code}
         r = session.post("https://api-t1.fyers.in/vagator/v2/verify_otp", json=payload2, headers=headers, timeout=10)
 
         if r.status_code != 200 or not r.json().get("s") == "ok":
@@ -122,14 +104,8 @@ def auto_auth_totp() -> bool:
         request_key = r.json().get("request_key", r.json().get("request_key"))
 
         # Step 3: PIN verification
-        logger.info("IDIP auth: Step 3 - PIN verification")
         pin_hash = hashlib.sha256(pin.encode()).hexdigest()  
-        
-        payload3 = {
-            "request_key": request_key,
-            "identity_type": "pin",
-            "identifier": pin_hash
-        }
+        payload3 = {"request_key": request_key, "identity_type": "pin", "identifier": pin_hash}
         r = session.post("https://api-t1.fyers.in/vagator/v2/verify_pin_v2", json=payload3, headers=headers, timeout=10)
 
         if r.status_code != 200 or not r.json().get("s") == "ok":
@@ -139,7 +115,6 @@ def auto_auth_totp() -> bool:
         access_token_temp = r.json().get("data", {}).get("access_token", "")
 
         # Step 4: Get auth code
-        logger.info("IDIP auth: Step 4 - getting auth code")
         payload4 = {
             "fyers_id": pan_or_dob,
             "app_id": app_id,
@@ -155,7 +130,6 @@ def auto_auth_totp() -> bool:
         
         headers_auth = headers.copy()
         headers_auth["Authorization"] = f"Bearer {access_token_temp}"
-        
         r = session.post("https://api.fyers.in/api/v3/token", json=payload4, headers=headers_auth, timeout=10)
 
         if r.status_code != 302:
@@ -173,10 +147,7 @@ def auto_auth_totp() -> bool:
             return False
 
         # Step 5: Exchange for access token
-        logger.info("TOTP auth: Step 5 - exchanging for access token")
-        from fyers_apiv3 import fyersModel
         from fyers_apiv3.fyersModel import SessionModel
-
         sess = SessionModel(
             client_id=client_id,
             secret_key=secret_key,
@@ -228,6 +199,7 @@ def telegram_auth_request() -> bool:
     import urllib.parse
     from fyers_apiv3.fyersModel import SessionModel
 
+    logger.info("Attempting Mode B: Telegram Manual Auth...")
     sess = SessionModel(
         client_id=settings.fyers_client_id,
         secret_key=settings.fyers_secret_key,
@@ -236,7 +208,6 @@ def telegram_auth_request() -> bool:
         grant_type="authorization_code"
     )
     auth_url = sess.generate_authcode()
-    logger.info(f"Fyers auth URL: {auth_url}")
 
     msg = (
         f"<b>🔑 Fyers daily re-auth needed</b>\n\n"
@@ -259,7 +230,7 @@ def telegram_auth_request() -> bool:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
                 self.end_headers()
-                self.wfile.write(b"<h1>Auth successful! Return to terminal.</h1>")
+                self.wfile.write(b"<h1 style='color:green;'>Auth captured! Return to terminal.</h1>")
                 return
 
             self.send_response(200)
@@ -267,7 +238,6 @@ def telegram_auth_request() -> bool:
             self.end_headers()
             html = b"""
             <html>
-                <head><meta charset="utf-8"><title>Auth callback</title></head>
                 <body>
                     <h1>Completing authentication...</h1>
                     <script>
@@ -275,7 +245,7 @@ def telegram_auth_request() -> bool:
                                    new URLSearchParams(window.location.hash.substring(1)).get('auth_code');
                         if (code) {
                             fetch('/_capture', {method: 'POST', body: JSON.stringify({code: code})})
-                            .then(()=> document.body.innerHTML = '<h1>Auth captured! Close this tab.</h1>');
+                            .then(()=> document.body.innerHTML = '<h1 style="color:green;">Auth captured! Close this tab.</h1>');
                         }
                     </script>
                 </body>
@@ -318,6 +288,9 @@ def telegram_auth_request() -> bool:
     return True
 
 
+# =============================================================================
+# # Helper Functions
+# =============================================================================
 def _send_telegram(msg: str):
     token = settings.telegram_bot_token
     chat_id = settings.telegram_chat_id
@@ -325,14 +298,26 @@ def _send_telegram(msg: str):
         return
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "timeout": 5}
-        requests.post(url, json=payload)
+        payload = {"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}
+        requests.post(url, json=payload, timeout=5)
     except Exception:
         pass
 
 
+def is_token_fresh() -> bool:
+    """Checks if the token file exists and was created today."""
+    if not TOKEN_PATH.exists():
+        return False
+    try:
+        data = json.loads(TOKEN_PATH.read_text())
+        today = datetime.now(IST).strftime("%Y-%m-%d")
+        return data.get("date") == today and bool(data.get("token"))
+    except Exception:
+        return False
+
+
 def verify_token() -> bool:
-    """Quick check that the saved token is valid."""
+    """Quick check that the saved token is valid with the broker."""
     try:
         from data.fyers_client import fyers_client
         ok = fyers_client.connect()
@@ -346,30 +331,44 @@ def verify_token() -> bool:
 
 
 # =============================================================================
-# # Scheduler Integration Wrapper
+# # Unified Entry Point
 # =============================================================================
 def generate_token() -> bool:
     """
-    Unified entry point for scheduler.py.
-    Attempts headless TOTP first, falls back to Telegram Auth.
+    Intelligent logic flow:
+    1. Check for today's file -> Ping Broker.
+    2. Attempt Headless TOTP login.
+    3. Fallback to Telegram manual URL.
     """
     logger.info(f"Auto-auth pipeline triggered | {datetime.now(IST).strftime('%H:%M IST')}")
+
+    # 1. The Cache Check (Prevents Docker restart loops)
+    if is_token_fresh():
+        logger.info("Local token found for today. Pinging broker to verify...")
+        if verify_token():
+            logger.success("Valid active token confirmed. Skipping re-authentication.")
+            return True
+
+    # 2. Mode A (Headless)
     success = auto_auth_totp()
+    
+    # 3. Mode B (Manual Fallback)
     if not success:
-        logger.warning("TOTP auth failed - escalating to Telegram manual intervention.")
+        logger.warning("TOTP auth bypassed or failed. Escalating to Telegram...")
         success = telegram_auth_request()
 
+    # 4. Final System Check
     if success:
         return verify_token()
     else:
-        msg = "❌ <b>Fyers auto-auth FAILED</b> - System will be locked out of market data today."
+        msg = "❌ <b>Fyers auto-auth FAILED</b> - System locked out of market data."
         logger.error(msg)
         _send_telegram(msg)
         return False
 
 
 # =============================================================================
-# # Manual Terminal Entry
+# # Terminal Execution (Used by entrypoint.sh)
 # =============================================================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Auto-authenticate with Fyers")
@@ -379,4 +378,5 @@ if __name__ == "__main__":
     if args.test:
         sys.exit(0 if verify_token() else 1)
 
+    # This is the line that actually runs the smart logic when Docker boots
     sys.exit(0 if generate_token() else 1)

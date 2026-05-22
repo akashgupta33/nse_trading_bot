@@ -127,6 +127,23 @@ class TradeDatabase:
         except Exception as e:
             logger.error(f"DB log error: {e}")
 
+    def get_daily_pnl(self) -> float:
+        """Calculates today's realized PnL from the database."""
+        try:
+            today_str = datetime.now(IST).strftime("%Y-%m-%d")
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                # Sum all PnL entries logged today
+                cursor.execute("""
+                    SELECT SUM(pnl) FROM trades 
+                    WHERE timestamp LIKE ? AND pnl IS NOT NULL
+                """, (f"{today_str}%",))
+                result = cursor.fetchone()[0]
+                return float(result) if result else 0.0
+        except Exception as e:
+            logger.error(f"Error calculating daily PnL: {e}")
+            return 0.0
+
 
 # =============================================================================
 # EXTENDED PORTFOLIO ALERTER (FOR COGNITIVE DESK SYSTEM)
@@ -134,6 +151,10 @@ class TradeDatabase:
 
 class PortfolioAlerter(TelegramAlerter):
     """Extends TelegramAlerter with CTM AI portfolio-specific messages."""
+    
+    def alert_scan_start(self):
+        """Sends a startup message to Telegram when the EOD pipeline begins."""
+        self.send("🔍 <b>System Awake:</b> Initiating End-of-Day Market Scan...")
 
     def alert_screener_complete(self, top_n: int, bear_market: bool):
         if bear_market:
@@ -155,6 +176,20 @@ class PortfolioAlerter(TelegramAlerter):
                 f"    📝 <i>{ws.thesis[:120]}</i>"
             )
         self.send("\n".join(lines))
+        
+    def alert_portfolio_decision(self, comment: str, decisions: list):
+        """Outputs the final logic of the Execution Manager."""
+        msg = f"💼 <b>Portfolio Manager:</b>\n<i>{comment}</i>\n\n"
+        if not decisions:
+            msg += "No execution actions taken today."
+        else:
+            for d in decisions:
+                action = str(d.get('action', '')).upper()
+                sym = d.get('symbol', '')
+                qty = d.get('quantity', 0)
+                reason = d.get('reason', '')
+                msg += f"• <b>{action}</b> {qty}x {sym}\n  <i>{reason}</i>\n"
+        self.send(msg)
         
     def alert_claude_execution(self, symbol: str, action: str, reason: str, desk_name: str = "Execution Desk"):
         """Fires when Claude actively intervenes on an exit (Inflection, Stagnation, Risk)."""

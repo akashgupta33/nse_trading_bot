@@ -5,6 +5,21 @@ from loguru import logger
 
 import anthropic
 from config.settings import settings
+import json
+import numpy as np
+
+class NumpyEncoder(json.JSONEncoder):
+    """Translates NumPy data types into standard Python types for JSON serialization."""
+    def default(self, obj):
+        if isinstance(obj, (np.bool_, bool)):
+            return bool(obj)
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
 
 @dataclass
 class WatchlistStock:
@@ -177,7 +192,7 @@ class AnalystAgent:
         # Combine Technicals and Fundamentals into one clean JSON block
         data = snap.to_dict()
         data["fundamentals"] = getattr(snap, "fundamentals", {})
-        return json.dumps(data, indent=2)
+        return json.dumps(data, indent=2, cls=NumpyEncoder)
 
     def analyse(self, candidates: list) -> list:
         """
@@ -202,7 +217,7 @@ class AnalystAgent:
 
         for iteration in range(12):
             response = self.client.messages.create(
-                model="claude-3-5-sonnet-20241022",
+                model="claude-sonnet-4-5",
                 max_tokens=4000,
                 system=ANALYST_SYSTEM_PROMPT,
                 tools=ANALYST_TOOLS,

@@ -40,7 +40,7 @@ class ScreenerAgent:
                 continue
             try:
                 # fyers_client already returns clean, tz-naive data. No further conversion needed.
-                df = fyers_client.get_historical(sym, days=220, resolution="D")
+                df = fyers_client.get_historical(sym, days=365, resolution="D")
                 if df is not None and not df.empty:
                     universe_data[sym] = df
                 
@@ -90,16 +90,16 @@ class ScreenerAgent:
     def _check_nifty_trend(self) -> bool:
         """Returns True if Nifty50 is above its 200 EMA (healthy market environment)."""
         try:
-            df = fyers_client.get_historical(settings.nifty_symbol, days=220, resolution="D")
+            df = fyers_client.get_historical(settings.nifty_symbol, days=365, resolution="D")
             if df is None or df.empty:
                 logger.warning("Could not fetch Nifty data - assuming market ok to prevent hard block.")
-                return True
+                return False
                 
             # Compute the indicator snapshot for Nifty50
             snap = indicator_engine.compute(settings.nifty_symbol, df)
             
             if not snap:
-                return True
+                return False
 
             is_above = snap.price_above_ema200
             logger.info(
@@ -110,7 +110,7 @@ class ScreenerAgent:
 
         except Exception as e:
             logger.error(f"Nifty macro check exception: {e}")
-            return True
+            return False
 
 
 # Singleton

@@ -145,7 +145,7 @@ class TradingBrain:
 
         for _ in range(10):
             response = self.client.messages.create(
-                model="claude-3-5-sonnet-20241022", 
+                model="claude-sonnet-4-5", 
                 max_tokens=4000,
                 system=system_prompt, 
                 tools=TOOLS, 
@@ -191,7 +191,7 @@ class TradingBrain:
         """Helper method to cleanly request and parse JSON from Claude."""
         try:
             response = self.client.messages.create(
-                model="claude-3-5-sonnet-20241022",
+                model="claude-sonnet-4-5",
                 max_tokens=200,
                 temperature=0.1,  
                 messages=[{"role": "user", "content": prompt}]
